@@ -91,7 +91,14 @@ import pandas as pd
 import powerplantmatching as pm
 import pypsa
 import xarray as xr
-from _helpers import configure_logging, create_logger, read_csv_nafix, update_p_nom_max
+#from _helpers import configure_logging, create_logger, read_csv_nafix, update_p_nom_max
+from _helpers import (
+    add_storage_col_to_costs, #new in _helpers.py
+    configure_logging, 
+    getContinent, # ???
+    nested_storage_dict, #new in _helpers.py
+    update_p_nom_max,
+)
 from powerplantmatching.export import map_country_bus
 
 idx = pd.IndexSlice
@@ -117,18 +124,23 @@ def calculate_annuity(n, r):
     else:
         return 1 / n
 
-
+# for carriers in costs yet non belongin to the network , emissions parameters are extracted and added to the newtowrk
 def _add_missing_carriers_from_costs(n, costs, carriers):
+    #evaluate difference between carriers in costs and network
     missing_carriers = pd.Index(carriers).difference(n.carriers.index)
     if missing_carriers.empty:
         return
-
+    #column selection with emissions parameters from the costs file
     emissions_cols = (
         costs.columns.to_series().loc[lambda s: s.str.endswith("_emissions")].values
     )
+    #missing carrier name split by - and extracted 1st term
     suptechs = missing_carriers.str.split("-").str[0]
+    #fillin emission parameter NaN values with 0
     emissions = costs.loc[suptechs, emissions_cols].fillna(0.0)
+    #index rename
     emissions.index = missing_carriers
+    #emissions data of the carriers import to network
     n.import_components_from_dataframe(emissions, "Carrier")
 
 
@@ -190,26 +202,60 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
     )
     costs.loc["csp"] = costs.loc["csp-tower"]
 
-    def costs_for_storage(store, link1, link2=None, max_hours=1.0):
+    """ def costs_for_storage(store, link1, link2=None, max_hours=1.0):
         capital_cost = link1["capital_cost"] + max_hours * store["capital_cost"]
         if link2 is not None:
             capital_cost += link2["capital_cost"]
+        ) """
+    
+    def costs_for_storageunit(store, link1, link2=pd.DataFrame(), max_hours=1.0):
+        capital_cost = float(link1["capital_cost"]) + float(max_hours) * float(
+            store["capital_cost"]
+        )
+        if not link2.empty:
+            capital_cost += float(link2["capital_cost"])
         return pd.Series(
             dict(capital_cost=capital_cost, marginal_cost=0.0, co2_emissions=0.0)
         )
+    
 
     max_hours = elec_config["max_hours"]
-    costs.loc["battery"] = costs_for_storage(
+    """ costs.loc["battery"] = costs_for_storage( """
+    costs.loc["battery"] = costs_for_storageunit(
         costs.loc["battery storage"],
         costs.loc["battery inverter"],
         max_hours=max_hours["battery"],
     )
-    costs.loc["H2"] = costs_for_storage(
+    """ costs.loc["H2"] = costs_for_storage( """
+    costs.loc["H2"] = costs_for_storageunit(
         costs.loc["hydrogen storage tank"],
         costs.loc["fuel cell"],
         costs.loc["electrolysis"],
         max_hours=max_hours["H2"],
     )
+
+    # nested_storage_dict defined in _helpers.py
+    # storage_meta_dict, storage_techs: output della function
+    storage_meta_dict, storage_techs = nested_storage_dict(tech_costs)
+    # function defined in _helpers.py tbv
+    costs = add_storage_col_to_costs(costs, storage_meta_dict, storage_techs)
+
+    # add capital_cost to all storage_units indexed by carrier e.g. "lead" or "concrete"!= from battery and H2
+    for c in costs.loc[storage_techs, "carrier"].unique():
+        carrier = costs.carrier
+        tech_type = costs.technology_type
+        store_filter = (carrier == c) & (tech_type == "store")
+        charger_or_bicharger_filter = (carrier == c) & (
+            (tech_type == "bicharger") | (tech_type == "charger")
+        )
+        discharger_filter = (carrier == c) & (tech_type == "discharger")
+        costs.loc[c] = costs_for_storageunit(
+            costs.loc[store_filter],
+            costs.loc[charger_or_bicharger_filter],
+            costs.loc[discharger_filter],
+            max_hours=max_hours["battery"],
+            # TODO: max_hours data should be read as costs.loc[carrier==c,max_hours] (easy possible)
+        )
 
     for attr in ("marginal_cost", "capital_cost"):
         overwrites = config.get(attr)
