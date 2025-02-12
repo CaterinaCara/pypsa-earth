@@ -70,8 +70,8 @@ logger = create_logger(__name__)
 
 
 def attach_storageunits(n, costs, config):
-    elec_opts = config["electricity"]
-    carriers = elec_opts["extendable_carriers"]["StorageUnit"]
+"""     elec_opts = config["electricity"]
+    carriers = elec_opts["extendable_carriers"]["StorageUnit"] """
     max_hours = elec_opts["max_hours"]
 
     _add_missing_carriers_from_costs(n, costs, carriers)
