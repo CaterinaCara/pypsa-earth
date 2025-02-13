@@ -95,9 +95,11 @@ import xarray as xr
 from _helpers import (
     add_storage_col_to_costs, #new in _helpers.py
     configure_logging, 
-    getContinent, # ???
+    #getContinent, # ???
+    create_logger,
     nested_storage_dict, #new in _helpers.py
     update_p_nom_max,
+    read_csv_nafix
 )
 from powerplantmatching.export import map_country_bus
 
@@ -130,12 +132,18 @@ def _add_missing_carriers_from_costs(n, costs, carriers):
     missing_carriers = pd.Index(carriers).difference(n.carriers.index)
     if missing_carriers.empty:
         return
+    
+    costs_index_df = pd.DataFrame(costs.index)
+    costs_index_df.to_csv('c:/Users/d094217/Desktop/PR-pypsa-earth/pypsa-earth/costs_index.csv', index=True)
+
     #column selection with emissions parameters from the costs file
     emissions_cols = (
         costs.columns.to_series().loc[lambda s: s.str.endswith("_emissions")].values
     )
     #missing carrier name split by - and extracted 1st term
     suptechs = missing_carriers.str.split("-").str[0]
+    print("supertechs:")
+    print(suptechs)
     #fillin emission parameter NaN values with 0
     emissions = costs.loc[suptechs, emissions_cols].fillna(0.0)
     #index rename
@@ -148,6 +156,9 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
     """
     Set all asset costs and other parameters.
     """
+    if not tech_costs:
+        raise ValueError("No tech_chost input missing or not defined.")
+
     costs = pd.read_csv(tech_costs, index_col=["technology", "parameter"]).sort_index()
 
     # correct units to MW and EUR
@@ -176,6 +187,9 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
         * Nyears
     )
 
+    print("Costs Dataframe after creating capital_cost column:")
+    print(costs.head())
+
     costs.at["OCGT", "fuel"] = costs.at["gas", "fuel"]
     costs.at["CCGT", "fuel"] = costs.at["gas", "fuel"]
 
@@ -202,42 +216,52 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
     )
     costs.loc["csp"] = costs.loc["csp-tower"]
 
+    print("Costs Dataframe before calloing costs_for_storageunit:")
+    print(costs.head())
+
     """ def costs_for_storage(store, link1, link2=None, max_hours=1.0):
         capital_cost = link1["capital_cost"] + max_hours * store["capital_cost"]
         if link2 is not None:
             capital_cost += link2["capital_cost"]
         ) """
-    
+    """   capital_cost = float(link1["capital_cost"]) + float(max_hours) * float(
+    store["capital_cost"]
+)
+if not link2.empty:
+    capital_cost += float(link2["capital_cost"]) """
+
     def costs_for_storageunit(store, link1, link2=pd.DataFrame(), max_hours=1.0):
-        capital_cost = float(link1["capital_cost"]) + float(max_hours) * float(
-            store["capital_cost"]
-        )
-        if not link2.empty:
-            capital_cost += float(link2["capital_cost"])
+        print("store:", store)
+        print("link1:", link1)
+        print("link2:", link2)
+        capital_cost = link1["capital_cost"] + max_hours * store["capital_cost"]
+        #if link2 is not None:
+        if not link2.empty and "capital_cost" in link2:
+            capital_cost += link2["capital_cost"]
         return pd.Series(
             dict(capital_cost=capital_cost, marginal_cost=0.0, co2_emissions=0.0)
-        )
-    
+        ) #creation of a series as output, from dictionary
 
     max_hours = elec_config["max_hours"]
-    """ costs.loc["battery"] = costs_for_storage( """
+
     costs.loc["battery"] = costs_for_storageunit(
         costs.loc["battery storage"],
         costs.loc["battery inverter"],
-        max_hours=max_hours["battery"],
+        max_hours=max_hours["battery"]
     )
-    """ costs.loc["H2"] = costs_for_storage( """
+
     costs.loc["H2"] = costs_for_storageunit(
         costs.loc["hydrogen storage tank"],
         costs.loc["fuel cell"],
         costs.loc["electrolysis"],
-        max_hours=max_hours["H2"],
+        max_hours=max_hours["H2"]
     )
-
+    print("Costs Dataframe after calling costs_for_storageunit:")
+    print(costs.head())
     # nested_storage_dict defined in _helpers.py
     # storage_meta_dict, storage_techs: output della function
     storage_meta_dict, storage_techs = nested_storage_dict(tech_costs)
-    # function defined in _helpers.py tbv
+        # function defined in _helpers.py
     costs = add_storage_col_to_costs(costs, storage_meta_dict, storage_techs)
 
     # add capital_cost to all storage_units indexed by carrier e.g. "lead" or "concrete"!= from battery and H2
@@ -249,6 +273,10 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
             (tech_type == "bicharger") | (tech_type == "charger")
         )
         discharger_filter = (carrier == c) & (tech_type == "discharger")
+        print(f"Processing carrier: {c}")
+        print(f"store_filter: {store_filter}")
+        print(f"charger_or_bicharger_filter: {charger_or_bicharger_filter}")
+        print(f"discharger_filter: {discharger_filter}")
         costs.loc[c] = costs_for_storageunit(
             costs.loc[store_filter],
             costs.loc[charger_or_bicharger_filter],

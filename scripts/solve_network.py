@@ -97,7 +97,7 @@ from pypsa.linopf import (
     network_lopf,
 )
 from pypsa.linopt import define_constraints, get_var, join_exprs, linexpr
-
+from add_electricity import (load_costs)
 logger = create_logger(__name__)
 pypsa.pf.logger.setLevel(logging.WARNING)
 
@@ -1001,7 +1001,7 @@ if __name__ == "__main__":
             simpl="",
             clusters="6",#clusters="54",
             ll="copt",
-            opts="Co2L-4H #opts="Co2L-1H",
+            opts="Co2L-4H",
         )
 
     configure_logging(snakemake)

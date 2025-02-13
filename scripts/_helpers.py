@@ -98,7 +98,7 @@ def copy_default_files():
             "# Write down config entries differing from config.default.yaml\n\nrun: {}"
         )
 
-
+#def to register info related to the steps of the run
 def create_logger(logger_name, level=logging.INFO):
     """
     Create a logger for a module and adds a handler needed to capture in logs
@@ -355,7 +355,7 @@ def aggregate_p_curtailed(n):
         ]
     )
 
-
+# network component costs computation
 def aggregate_costs(n, flatten=False, opts=None, existing_only=False):
     components = dict(
         Link=("p_nom", "p0"),
@@ -365,7 +365,7 @@ def aggregate_costs(n, flatten=False, opts=None, existing_only=False):
         Line=("s_nom", None),
         Transformer=("s_nom", None),
     )
-
+    # c access df for each compoonent listed above
     costs = {}
     for c, (p_nom, p_attr) in zip(
         n.iterate_components(components.keys(), skip_empty=False), components.values()
@@ -952,8 +952,7 @@ pz-max marked this conversation as resolved.
     return [nested_storage_dict, storage_techs]
     #storage_techs is a list with the techs in the index
 
-# "carrier", "type", "technology_type" columns added to costs.csv (composed by index=technology and 1st column=further description)
-def add_storage_col_to_costs(costs, storage_meta_dict, storage_techs):
+
     """
     Add storage specific columns e.g. "carrier", "type", "technology_type" to costs.csv
     Input:
@@ -973,13 +972,20 @@ def add_storage_col_to_costs(costs, storage_meta_dict, storage_techs):
         }
     The columns "carrier", "type", "technology_type" will be added to costs.csv
     """
+# "carrier", "type", "technology_type" columns added to costs.csv (composed by index=technology and 1st column=further description)
+def add_storage_col_to_costs(costs, nested_storage_dict, storage_techs):
     # add storage specific columns to costs.csv
     for c in ["carrier", "technology_type", "type"]:
         
-        costs.loc[storage_techs, c] = [ # access to costs.csv df where index is storage_techs and to each added column c =["carrier", "technology_type", "type"]
+        costs.loc[storage_techs, c] = [
+        ",".join(nested_storage_dict[X][c]) for X in costs.loc[storage_techs].index
+    ]
+        
+        
+        """ [ # access to costs.csv df where index is storage_techs and to each added column c =["carrier", "technology_type", "type"]
             #X is each storage_techs element
-            storage_meta_dict[X][c] for X in costs.loc[storage_techs].index
-        ]
+            nested_storage_dict[X][c] for X in costs.loc[storage_techs].index 
+        ] """
     # remove all 'elec's from carrier columns and read carrier as string
     for i in range(len(costs.loc[storage_techs])):
         #access to the storage_techs index and "carrier" column
