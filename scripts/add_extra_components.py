@@ -81,6 +81,8 @@ def attach_storageunits(n, costs, config):
     lookup_store = {"H2": "electrolysis", "battery": "battery inverter"}
     lookup_dispatch = {"H2": "fuel cell", "battery": "battery inverter"}
 
+    print("CIAO")
+
     for carrier in carriers:
         n.madd(
             "StorageUnit",
