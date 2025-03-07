@@ -91,15 +91,19 @@ import pandas as pd
 import powerplantmatching as pm
 import pypsa
 import xarray as xr
-#from _helpers import configure_logging, create_logger, read_csv_nafix, update_p_nom_max
+
+# from _helpers import configure_logging, create_logger, read_csv_nafix, update_p_nom_max
 from _helpers import (
-    add_storage_col_to_costs, #new in _helpers.py
-    configure_logging, 
-    #getContinent, # ???
+    add_storage_col_to_costs,  # --> input costs, storage_meta_dict, storage_techs #new in _helpers.py # "carrier", "type", "technology_type" columns added to costs.csv filled with NaN (costs df previously composed by index=technology and 1st column=further description)
+)
+from _helpers import (
+    nested_storage_dict,  # new in _helpers.py gives storage_techs e storage_meta_dict
+)
+from _helpers import (  # getContinent, # ???
+    configure_logging,
     create_logger,
-    nested_storage_dict, #new in _helpers.py
+    read_csv_nafix,
     update_p_nom_max,
-    read_csv_nafix
 )
 from powerplantmatching.export import map_country_bus
 
@@ -112,11 +116,13 @@ def normed(s):
     return s / s.sum()
 
 
+# COMPUTE ANNUITY FACTOR
 def calculate_annuity(n, r):
     """
     Calculate the annuity factor for an asset with lifetime n years and
     discount rate of r, e.g. annuity(20, 0.05) * 20 = 1.6.
     """
+    # n
     if isinstance(r, pd.Series):
         return pd.Series(1 / n, index=r.index).where(
             r == 0, r / (1.0 - 1.0 / (1.0 + r) ** n)
@@ -126,30 +132,36 @@ def calculate_annuity(n, r):
     else:
         return 1 / n
 
+
 # for carriers in costs yet non belongin to the network , emissions parameters are extracted and added to the newtowrk
 def _add_missing_carriers_from_costs(n, costs, carriers):
-    #evaluate difference between carriers in costs and network
+    # evaluate difference between carriers in costs and network
     missing_carriers = pd.Index(carriers).difference(n.carriers.index)
     if missing_carriers.empty:
         return
-    
-    costs_index_df = pd.DataFrame(costs.index)
-    costs_index_df.to_csv('c:/Users/d094217/Desktop/PR-pypsa-earth/pypsa-earth/costs_index.csv', index=True)
 
-    #column selection with emissions parameters from the costs file
+    costs_index_df = pd.DataFrame(costs.index)
+    costs_index_df.to_csv(
+        "c:/Users/d094217/Desktop/PR-pypsa-earth/pypsa-earth/costs_index.csv",
+        index=True,
+    )
+
+    # column selection with emissions parameters from the costs file
     emissions_cols = (
         costs.columns.to_series().loc[lambda s: s.str.endswith("_emissions")].values
     )
-    #missing carrier name split by - and extracted 1st term
+    # missing carrier name split by - and extracted 1st term
     suptechs = missing_carriers.str.split("-").str[0]
-    print("supertechs:")
-    print(suptechs)
-    #fillin emission parameter NaN values with 0
+    # print("supertechs:")
+    # print(suptechs)
+    # fillin emission parameter NaN values with 0
     emissions = costs.loc[suptechs, emissions_cols].fillna(0.0)
-    #index rename
+    # index rename
     emissions.index = missing_carriers
-    #emissions data of the carriers import to network
+    # emissions data of the carriers import to network
     n.import_components_from_dataframe(emissions, "Carrier")
+    # costs all columns defined but carriers, technology_type, type are still nan values
+    # costs derived from def load_costs(tech_costs, config, elec_config, Nyears=1): function
 
 
 def load_costs(tech_costs, config, elec_config, Nyears=1):
@@ -177,7 +189,7 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
             logger.info(
                 f"Overwriting {attr} of {overwrites.index} to {overwrites.values}"
             )
-
+    # extracted detail for each technology:  C in fuel  C stored  CO2 intensity  CO2 stored   ore-input  p_nom_ratio  pelletizing cost ...
     costs["capital_cost"] = (
         (
             calculate_annuity(costs["lifetime"], costs["discount rate"])
@@ -186,14 +198,17 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
         * costs["investment"]
         * Nyears
     )
-
+    # addition of column capital_costs computed as defined above
+    """
     print("Costs Dataframe after creating capital_cost column:")
     print(costs.head())
+    """
 
     costs.at["OCGT", "fuel"] = costs.at["gas", "fuel"]
     costs.at["CCGT", "fuel"] = costs.at["gas", "fuel"]
 
     costs["marginal_cost"] = costs["VOM"] + costs["fuel"] / costs["efficiency"]
+    # addition of column marginal_cost computed as defined above
 
     costs = costs.rename(columns={"CO2 intensity": "co2_emissions"})
     # rename because technology data & pypsa earth costs.csv use different names
@@ -216,8 +231,10 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
     )
     costs.loc["csp"] = costs.loc["csp-tower"]
 
+    """
     print("Costs Dataframe before calloing costs_for_storageunit:")
     print(costs.head())
+    """
 
     """ def costs_for_storage(store, link1, link2=None, max_hours=1.0):
         capital_cost = link1["capital_cost"] + max_hours * store["capital_cost"]
@@ -231,56 +248,83 @@ if not link2.empty:
     capital_cost += float(link2["capital_cost"]) """
 
     def costs_for_storageunit(store, link1, link2=pd.DataFrame(), max_hours=1.0):
-        print("store:", store)
-        print("link1:", link1)
-        print("link2:", link2)
+        # print("store:", store)
+        # print("link1:", link1)
+        # print("link2:", link2)
         capital_cost = link1["capital_cost"] + max_hours * store["capital_cost"]
-        #if link2 is not None:
+        # if link2 is not None:
         if not link2.empty and "capital_cost" in link2:
             capital_cost += link2["capital_cost"]
         return pd.Series(
             dict(capital_cost=capital_cost, marginal_cost=0.0, co2_emissions=0.0)
-        ) #creation of a series as output, from dictionary
+        )  # creation of a series as output, from dictionary
 
     max_hours = elec_config["max_hours"]
 
     costs.loc["battery"] = costs_for_storageunit(
         costs.loc["battery storage"],
         costs.loc["battery inverter"],
-        max_hours=max_hours["battery"]
+        max_hours=max_hours["battery"],
     )
 
     costs.loc["H2"] = costs_for_storageunit(
         costs.loc["hydrogen storage tank"],
         costs.loc["fuel cell"],
         costs.loc["electrolysis"],
-        max_hours=max_hours["H2"]
+        max_hours=max_hours["H2"],
     )
-    print("Costs Dataframe after calling costs_for_storageunit:")
-    print(costs.head())
+
+    # print("Costs Dataframe after calling costs_for_storageunit:")
+    # print(costs.head())
     # nested_storage_dict defined in _helpers.py
     # storage_meta_dict, storage_techs: output della function
     storage_meta_dict, storage_techs = nested_storage_dict(tech_costs)
-        # function defined in _helpers.py
+    # costs df has the oveall technologies up to battery and H2
+    # add_storage_col_to_costs: function defined in _helpers.py allow to add 3 columns (carrier, technology_type e type) ---->also stoprage technologies listed in storage_techs
     costs = add_storage_col_to_costs(costs, storage_meta_dict, storage_techs)
 
     # add capital_cost to all storage_units indexed by carrier e.g. "lead" or "concrete"!= from battery and H2
-    for c in costs.loc[storage_techs, "carrier"].unique():
-        carrier = costs.carrier
-        tech_type = costs.technology_type
+    # for c in costs.loc[storage_techs, "carrier"]: #.unique(): #restituisce i valori unici (senza duplicati) della colonna carrier (carrier è series di pandas)
+    for c in costs.loc[
+        storage_techs, "carrier"
+    ].unique():  # ].index : #, "carrier"].unique(): #costs.loc[storage_techs, "carrier"].str.replace("elec,", "", regex=False).str.replace(",elec", "", regex=False):
+        carrier = costs.carrier[
+            storage_techs
+        ]  # costs.carrier #assegnando colonna "carrier" del df costs alla variabile carrier
+        tech_type = costs.technology_type[storage_techs]  # costs.technology_type
         store_filter = (carrier == c) & (tech_type == "store")
+        # store_filter = (costs.loc[storage_techs, "carrier"].str.replace("elec,", "", regex=False).str.replace(",elec", "", regex=False) == c ) & (costs.loc[storage_techs, "technology_type"] == "store")
+
         charger_or_bicharger_filter = (carrier == c) & (
             (tech_type == "bicharger") | (tech_type == "charger")
         )
+
+        """
+        charger_or_bicharger_filter = (costs.loc[storage_techs, "carrier"].str.replace("elec,", "", regex=False).str.replace(",elec", "", regex=False) == c ) & (
+            (costs.loc[storage_techs, "technology_type"] == "bicharger") |  (costs.loc[storage_techs, "technology_type"] == "charger")
+        )
+        """
+
         discharger_filter = (carrier == c) & (tech_type == "discharger")
+        """
+        discharger_filter = (costs.loc[storage_techs, "carrier"].str.replace("elec,", "", regex=False).str.replace(",elec", "", regex=False) == c ) & (costs.loc[storage_techs, "technology_type"] == "discharger")
+        """
+
+        """
         print(f"Processing carrier: {c}")
         print(f"store_filter: {store_filter}")
         print(f"charger_or_bicharger_filter: {charger_or_bicharger_filter}")
         print(f"discharger_filter: {discharger_filter}")
+        """
+        if not costs.loc[storage_techs][discharger_filter].empty:
+            discharger_filter = costs.loc[storage_techs][discharger_filter]
+        else:
+            discharger_filter = pd.DataFrame()
+
         costs.loc[c] = costs_for_storageunit(
-            costs.loc[store_filter],
-            costs.loc[charger_or_bicharger_filter],
-            costs.loc[discharger_filter],
+            costs.loc[storage_techs][store_filter],
+            costs.loc[storage_techs][charger_or_bicharger_filter],
+            discharger_filter,
             max_hours=max_hours["battery"],
             # TODO: max_hours data should be read as costs.loc[carrier==c,max_hours] (easy possible)
         )
@@ -297,6 +341,7 @@ if not link2.empty:
     return costs
 
 
+# ppl_fn path to powerplants.csv file
 def load_powerplants(ppl_fn):
     carrier_dict = {
         "ocgt": "OCGT",
@@ -319,9 +364,11 @@ def load_powerplants(ppl_fn):
         logger.warning(f"Drop powerplants with null capacity: {list(null_ppls.name)}.")
         ppl = ppl.drop(null_ppls.index).reset_index(drop=True)
     return ppl
+    # ppl is a df with the powerplants data (CCGT, hydro, ...)
 
 
 def attach_load(n, demand_profiles):
+    # demand_profiles defines path to the demand csv in resources folder
     """
     Add load profiles to network buses.
 
@@ -339,7 +386,7 @@ def attach_load(n, demand_profiles):
         Now attached with load time series
     """
     demand_df = read_csv_nafix(demand_profiles, index_col=0, parse_dates=True)
-
+    # demand_df is a df with the demand data, as index has the snapshots for the defined time period - i.e. 2013
     n.madd("Load", demand_df.columns, bus=demand_df.columns, p_set=demand_df)
 
 
@@ -392,13 +439,13 @@ def update_transmission_costs(n, costs, length_factor=1.0, simple_hvdc_costs=Fal
 
 
 def attach_wind_and_solar(
-    n,
-    costs,
-    ppl,
-    input_files,
-    technologies,
-    extendable_carriers,
-    line_length_factor,
+    n,  # ok
+    costs,  # ok
+    ppl,  # ok
+    input_files,  # paths to input data as resources\\renewable_profiles\\profile_onwind.nc, data\\hydro_capacities.csv' ...
+    technologies,  # set of {'onwind', 'hydro', 'solar', 'offwind-ac', 'offwind-dc'}
+    extendable_carriers,  # from the config, electricity, extendable carriers
+    line_length_factor,  # fixed value
 ):
     # TODO: rename tech -> carrier, technologies -> carriers
     _add_missing_carriers_from_costs(n, costs, technologies)
@@ -473,25 +520,38 @@ def attach_wind_and_solar(
             )
 
 
+# compute capital cost for technologies, extendable_carriers, ppl
+
+
 def attach_conventional_generators(
     n,
-    costs,
-    ppl,
-    conventional_carriers,
-    extendable_carriers,
-    renewable_carriers,
-    conventional_config,
-    conventional_inputs,
+    costs,  # ok
+    ppl,  # df ok
+    conventional_carriers,  # ['nuclear', 'oil', 'OCGT', 'CCGT', 'coal', 'lignite', 'geothermal', 'biomass']
+    extendable_carriers,  # ok from config file dict of electricity extendable carriers {'Generator': ['solar', 'onwind', 'offwind-ac', 'offwind-dc', 'OCGT'], 'StorageUnit': ['sand'], 'Store': [], 'Link': []}
+    renewable_carriers,  # ok from config file techs RES
+    conventional_config,  # empty dict
+    conventional_inputs,  # empty dict
 ):
+
+    # set() defines a set of unique elements
+    # union of 2 sets: 1st set is the conventional carriers, 2nd set is the difference between extendable carriers and renewable carriers
     carriers = set(conventional_carriers) | (
-        set(extendable_carriers["Generator"]) - set(renewable_carriers)
+        set(extendable_carriers["Generator"])
+        - set(
+            renewable_carriers
+        )  # because other conventional techs could be also extendable
     )
     _add_missing_carriers_from_costs(n, costs, carriers)
 
     ppl = (
-        ppl.query("carrier in @carriers")
-        .join(costs, on="carrier", rsuffix="_r")
-        .rename(index=lambda s: "C" + str(s))
+        ppl.query(
+            "carrier in @carriers"
+        )  #  seleziona solo le righe in cui il valore nella colonna carrier è presente nel set o nella lista carriers: carriers è stato definito prima come la lisra di conventional
+        .join(costs, on="carrier", rsuffix="_r")  # unisce il DataFrame ppl con costs df
+        .rename(
+            index=lambda s: "C" + str(s)
+        )  # rinomina gli indici del df, aggiungendo una "C" all'inizio di ciascun indice
     )
     ppl["efficiency"] = ppl.efficiency.fillna(ppl.efficiency)
 
@@ -901,10 +961,12 @@ if __name__ == "__main__":
     Nyears = n.snapshot_weightings.objective.sum() / 8760.0
 
     # Snakemake imports:
-    demand_profiles = snakemake.input["demand_profiles"]
+    demand_profiles = snakemake.input[
+        "demand_profiles"
+    ]  # path c:\\Users\\d094217\\Desktop\\PR-pypsa-earth\\pypsa-earth\\resources\\demand_profiles.csv'
 
     costs = load_costs(
-        snakemake.input.tech_costs,
+        snakemake.input.tech_costs,  # path 'c:\\Users\\d094217\\Desktop\\PR-pypsa-earth\\pypsa-earth\\resources\\costs.csv'
         snakemake.params.costs,
         snakemake.params.electricity,
         Nyears,

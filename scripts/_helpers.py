@@ -98,7 +98,8 @@ def copy_default_files():
             "# Write down config entries differing from config.default.yaml\n\nrun: {}"
         )
 
-#def to register info related to the steps of the run
+
+# def to register info related to the steps of the run
 def create_logger(logger_name, level=logging.INFO):
     """
     Create a logger for a module and adds a handler needed to capture in logs
@@ -354,6 +355,7 @@ def aggregate_p_curtailed(n):
             ),
         ]
     )
+
 
 # network component costs computation
 def aggregate_costs(n, flatten=False, opts=None, existing_only=False):
@@ -892,47 +894,54 @@ def create_country_list(input, iso_coding=True):
 
     return full_codes_list
 
-#tech_costs containts the .csv file path
+
+# tech_costs containts the .csv file path
 def nested_storage_dict(tech_costs):
     """
-    Create a nested dictionary with a storage index and meta data relation.
-pz-max marked this conversation as resolved.
-    The costs.csv file from the technology_data interface contains metadata
-    for storage technologies when the PNNL data extractions is activated PR #67.
-    The metadata is stored in a csv as a nested dictionary value which is
-    read out by this function and converted to a nested dictionary for further
-    use. One example use the metadata enables is the automatic energy storage
-    creation in the model from the config.yaml.
-    Input:
-    ------
-    tech_costs: str, path to technology costs.csv file # retrieve the string info from the costs.csv file
-    Output:
-    -------
-    nested_dict: dict, nested dictionary with storage index and meta data relation # dict with storage index and add its details
-    storage_techs: list, list of unique storage technologies 
-    Example:
-    --------
-    Data format in Input:
-    costs['further description'][0] -> {'carrier': ['elec', 'nizn', 'elec'], 'technology_type': ['bicharger'], 'type': ['electrochemical']} with index 'Ni-Zn-bicharger'
-    costs['further description'][1] -> {'carrier': ['nizn'], 'technology_type': ['store'], 'type': ['electrochemical']} with index 'Ni-Zn-store'
-    Output:
-    .. code-block:: python
-        {
-        'Ni-Zn-bicharger': {'carrier': ['elec', 'nizn', 'elec'], 'technology_type': ['bicharger'], 'type': ['electrochemical']}
-        'Ni-Zn-store': {'carrier': ['nizn'], 'technology_type': ['store'], 'type': ['electrochemical']}
-        ...
-        }
+        Create a nested dictionary with a storage index and meta data relation.
+    pz-max marked this conversation as resolved.
+        The costs.csv file from the technology_data interface contains metadata
+        for storage technologies when the PNNL data extractions is activated PR #67.
+        The metadata is stored in a csv as a nested dictionary value which is
+        read out by this function and converted to a nested dictionary for further
+        use. One example use the metadata enables is the automatic energy storage
+        creation in the model from the config.yaml.
+        Input:
+        ------
+        tech_costs: str, path to technology costs.csv file # retrieve the string info from the costs.csv file
+        Output:
+        -------
+        nested_dict: dict, nested dictionary with storage index and meta data relation # dict with storage index and add its details
+        storage_techs: list, list of unique storage technologies
+        Example:
+        --------
+        Data format in Input:
+        costs['further description'][0] -> {'carrier': ['elec', 'nizn', 'elec'], 'technology_type': ['bicharger'], 'type': ['electrochemical']} with index 'Ni-Zn-bicharger'
+        costs['further description'][1] -> {'carrier': ['nizn'], 'technology_type': ['store'], 'type': ['electrochemical']} with index 'Ni-Zn-store'
+        Output:
+        .. code-block:: python
+            {
+            'Ni-Zn-bicharger': {'carrier': ['elec', 'nizn', 'elec'], 'technology_type': ['bicharger'], 'type': ['electrochemical']}
+            'Ni-Zn-store': {'carrier': ['nizn'], 'technology_type': ['store'], 'type': ['electrochemical']}
+            ...
+            }
     """
     import ast
+
     # read costs.csv file which path is indicated in tech_costs
     df = pd.read_csv(
         tech_costs,
-        index_col=["technology"], # "technology" column = index
-        usecols=["technology", "further description"], # read only these columns from the .csv
-    ).sort_index() #ordina/sort wrt the index
-    #filter df lines contining the string "{'carrier':" in the "further description" column
-    df = df[df["further description"].str.contains("{'carrier':", na=False)] 
-    #index extraction (thus "technology" column) and assignment to storage_techs
+        index_col=["technology"],  # "technology" column = index
+        usecols=[
+            "technology",
+            "further description",
+        ],  # read only these columns from the .csv
+    ).sort_index()  # ordina/sort wrt the index
+    # filter df lines contining the string "{'carrier':" in the "further description" column
+    df = df[
+        df["further description"].str.contains("{'carrier':", na=False)
+    ]  # retrieve only raws with "carrier" word in the "further description" column
+    # index extraction (thus "technology" column) and assignment to storage_techs
     storage_techs = df.index.unique()
     # dictionary creation
     nested_storage_dict = {}
@@ -940,18 +949,18 @@ pz-max marked this conversation as resolved.
         print("No storage technology found in costs.csv")
     else:
         for i in range(len(df)):
-            #string inside the cell converted into python object
+            # string inside the cell converted into python object
             storage_dict = ast.literal_eval(
-                #access to the 1st column ([0]) (further description - technology is the index) for each row i
+                # access to the 1st column ([0]) (further description - technology is the index) for each row i
                 df.iloc[i, 0]
             )  # https://stackoverflow.com/a/988251/13573820
-            #remove the "note" key from the dictionary, if it does not exist it returns None
+            # remove the "note" key from the dictionary, if it does not exist it returns None
             storage_dict.pop("note", None)
-            #dictionary where the keys are the technology name, included in the df.index, and the values are the corresponding "further description" column
-            nested_storage_dict[df.index[i]] = storage_dict 
+            # dictionary where the keys are the technology name, included in the df.index, and the values are the corresponding "further description" column
+            nested_storage_dict[df.index[i]] = storage_dict
     return [nested_storage_dict, storage_techs]
-    #storage_techs is a list with the techs in the index
-
+    # storage_techs is a list with the techs in the index
+    # index is the storage list, while first column is the further description content
 
     """
     Add storage specific columns e.g. "carrier", "type", "technology_type" to costs.csv
@@ -972,24 +981,25 @@ pz-max marked this conversation as resolved.
         }
     The columns "carrier", "type", "technology_type" will be added to costs.csv
     """
+
+
 # "carrier", "type", "technology_type" columns added to costs.csv (composed by index=technology and 1st column=further description)
 def add_storage_col_to_costs(costs, nested_storage_dict, storage_techs):
     # add storage specific columns to costs.csv
     for c in ["carrier", "technology_type", "type"]:
-        
+
         costs.loc[storage_techs, c] = [
-        ",".join(nested_storage_dict[X][c]) for X in costs.loc[storage_techs].index
-    ]
-        
-        
+            ",".join(nested_storage_dict[X][c]) for X in costs.loc[storage_techs].index
+        ]
+
         """ [ # access to costs.csv df where index is storage_techs and to each added column c =["carrier", "technology_type", "type"]
             #X is each storage_techs element
-            nested_storage_dict[X][c] for X in costs.loc[storage_techs].index 
+            nested_storage_dict[X][c] for X in costs.loc[storage_techs].index
         ] """
     # remove all 'elec's from carrier columns and read carrier as string
     for i in range(len(costs.loc[storage_techs])):
-        #access to the storage_techs index and "carrier" column
-        #join() changes the elements inside carriers into a single string
+        # access to the storage_techs index and "carrier" column
+        # join() changes the elements inside carriers into a single string
         costs.loc[storage_techs[i], "carrier"] = "".join(
             # select raws with carriers without 'elec' and join them
             [e for e in costs.loc[storage_techs].carrier.iloc[i] if e != "elec"]
@@ -1001,6 +1011,7 @@ def add_storage_col_to_costs(costs, nested_storage_dict, storage_techs):
             costs.loc[storage_techs].type.iloc[i]
         )
     return costs
+
 
 def get_last_commit_message(path):
     """
@@ -1029,11 +1040,12 @@ def get_last_commit_message(path):
     os.chdir(backup_cwd)
     return last_commit_message
 
+
 # !!!!!!!!!!!!!!!!!!!!!!!!!!
-# PYPSA-EARTH-SEC 
+# PYPSA-EARTH-SEC
 """ # define also in add_electricity.py as calculate_annuity:
 def calculate_annuity(n, r):
-   
+
     Calculate the annuity factor for an asset with lifetime n years and
     discount rate of r, e.g. annuity(20, 0.05) * 20 = 1.6.
 
@@ -1045,6 +1057,7 @@ def calculate_annuity(n, r):
         return r / (1.0 - 1.0 / (1.0 + r) ** n)
     else:
         return 1 / n """
+
 
 def annuity(n, r):
     """
@@ -1605,6 +1618,3 @@ def safe_divide(numerator, denominator, default_value=np.nan):
             f"Division by zero: {numerator} / {denominator}, returning NaN."
         )
         return np.nan
-    
-
-
