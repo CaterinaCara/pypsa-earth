@@ -143,28 +143,24 @@ def _add_missing_carriers_from_costs(n, costs, carriers):
         costs.columns.to_series().loc[lambda s: s.str.endswith("_emissions")].values
     )
     suptechs = missing_carriers.str.split("-").str[0]
-    #emissions = (
-     #   costs.loc[costs.index.intersection(suptechs), emissions_cols]
-      #  .reindex(suptechs, fill_value=0.0)
-    #)
+
     emissions = costs.loc[costs.index.intersection(suptechs), emissions_cols].reindex(
         suptechs, fill_value=0.0
     )
     emissions.index = missing_carriers
     n.import_components_from_dataframe(emissions, "Carrier")
 
+
 def load_costs(tech_costs, config, elec_config, Nyears=1):
     """
     Set all asset costs and other parameters.
     """
-    #costs = pd.read_csv(tech_costs, index_col=["technology", "parameter"], error_bad_lines=False).sort_index()
-    #costs = pd.read_csv(tech_costs, index_col=["technology", "parameter"], sep=",").sort_index()
     costs = pd.read_csv(
-        tech_costs, index_col=["technology", "parameter"], sep=","
+    tech_costs, index_col=["technology", "parameter"], sep=","
     ).sort_index()
     # correct units to MW and output_currency
     costs.loc[costs.unit.str.contains("/kW"), "value"] *= 1e3
-    #costs.loc[costs.unit.str.contains("/kW"), "value"] = pd.to_numeric(costs.loc[costs.unit.str.contains("/kW"), "value"]) * 1e3
+    # costs.loc[costs.unit.str.contains("/kW"), "value"] = pd.to_numeric(costs.loc[costs.unit.str.contains("/kW"), "value"]) * 1e3
     costs.unit = costs.unit.str.replace("/kW", "/MW")
     _currency_conversion_cache = build_currency_conversion_cache(
         costs,
@@ -200,7 +196,15 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
 
     costs = costs.value.unstack().fillna(config["fill_values"])
 
-    for attr in ("investment", "lifetime", "FOM", "VOM", "efficiency", "fuel", "max_hours"):
+    for attr in (
+        "investment",
+        "lifetime",
+        "FOM",
+        "VOM",
+        "efficiency",
+        "fuel",
+        "max_hours",
+    ):
         overwrites = config.get(attr)
         if overwrites is not None:
             overwrites = pd.Series(overwrites)
@@ -245,16 +249,13 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
         + (1 - config["rooftop_share"]) * costs.at["solar-utility", "capital_cost"]
     )
     costs.loc["csp"] = costs.loc["csp-tower"]
-    #costs.loc["H2_LT"] = costs.loc["PEM"]
-    #costs.loc["H2_HT"] = costs.loc["H2_SOFC"]
-
+    # costs.loc["H2_LT"] = costs.loc["PEM"]
+    # costs.loc["H2_HT"] = costs.loc["H2_SOFC"]
 
     def costs_for_storageunit(store, link1, link2=pd.DataFrame(), max_hours=1.0):
-        capital_cost = link1["capital_cost"] + (max_hours) * (
-            store["capital_cost"]
-        )
+        capital_cost = link1["capital_cost"] + (max_hours) * (store["capital_cost"])
         if not link2.empty:
-            capital_cost += (link2["capital_cost"])
+            capital_cost += link2["capital_cost"]
         return pd.Series(
             dict(capital_cost=capital_cost, marginal_cost=0.0, co2_emissions=0.0)
         )
@@ -332,9 +333,10 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
                     charger_or_bicharger_filter[charger_or_bicharger_filter].index
                 )
             ],  # costs.loc[charger_or_bicharger_filter],
-            discharger_filter, #costs[costs.index.isin(discharger_filter[discharger_filter].index)] , #discharger_filter,  # costs[costs.index.isin(discharger_filter[discharger_filter].index)], #costs.loc[discharger_filter],
-            
-            max_hours = float(costs.loc[store_filter[store_filter].index, "max_hours"].iloc[0]) #max_hours= float(costs[costs.index.isin(store_filter[store_filter].index)]["max_hours"])
+            discharger_filter,  # costs[costs.index.isin(discharger_filter[discharger_filter].index)] , #discharger_filter,  # costs[costs.index.isin(discharger_filter[discharger_filter].index)], #costs.loc[discharger_filter],
+            max_hours=float(
+                costs.loc[store_filter[store_filter].index, "max_hours"].iloc[0]
+            ),  # max_hours= float(costs[costs.index.isin(store_filter[store_filter].index)]["max_hours"])
         )
 
     for attr in ("marginal_cost", "capital_cost"):
@@ -629,15 +631,17 @@ def attach_hydro(n, costs, ppl):
         .rename(index=lambda s: f"{s} hydro")
     )
 
+    supported_techs = ["Run-Of-River", "Pumped Storage", "Reservoir"]
+    invalid_techs = ppl.loc[~ppl.technology.isin(supported_techs)]
 
     # Current fix, NaN technologies set to ROR
-    if ppl.technology.isna().any():
-        n_nans = ppl.technology.isna().sum()
+    if not invalid_techs.empty:
+        n_invalid = invalid_techs.shape[0]
         logger.warning(
-            f"Identified {n_nans} hydro powerplants with unknown technology.\n"
+            f"Identified {n_invalid} hydro powerplants with unknown technology.\n"
             "Initialized to 'Run-Of-River'"
         )
-        ppl.loc[ppl.technology.isna(), "technology"] = "Run-Of-River"
+        ppl.loc[invalid_techs.index, "technology"] = "Run-Of-River"
 
     ror = ppl.query('technology == "Run-Of-River"')
     phs = ppl.query('technology == "Pumped Storage"')
@@ -647,6 +651,7 @@ def attach_hydro(n, costs, ppl):
     if not inflow_idx.empty:
         """ with xr.open_dataarray(snakemake.input.profile_hydro) as inflow:
             found_plants = ppl.ppl_id[ppl.ppl_id.isin(inflow.indexes["plant"])]
+<<<<<<< HEAD
             missing_plants_idxs = ppl.index.difference(found_plants.index) """
         with xr.open_dataarray(snakemake.input.profile_hydro) as inflow:
             plants_in_inflow = inflow.indexes["plant"]
@@ -654,8 +659,9 @@ def attach_hydro(n, costs, ppl):
             # seleziona gli impianti il cui plant_id (indice originale) è presente negli inflow
             found_plants = ppl.plant_id[ppl.plant_id.isin(plants_in_inflow)]
 
-            # gli indici di ppl che NON hanno inflow
-            missing_plants_idxs = ppl.index.difference(found_plants.index)
+        
+            missing_plants_idxs = inflow_idx.difference(found_plants.index)
+
 
             print("found_plants:", len(found_plants))
             print("missing_plants:", len(missing_plants_idxs))
