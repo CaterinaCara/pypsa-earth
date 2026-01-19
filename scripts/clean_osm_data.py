@@ -21,7 +21,60 @@ from _helpers import (
 
 logger = create_logger(__name__)
 
+def _endpoints_signature(geom, ndigits=7):
+    """
+    Signature from rounded endpoints + number of vertices.
+    Orientation-invariant.
+    """
+    try:
+        if geom is None or geom.is_empty or geom.geom_type != "LineString":
+            return None
+        coords = list(geom.coords)
+        if len(coords) < 2:
+            return None
 
+        (x0, y0) = coords[0]
+        (x1, y1) = coords[-1]
+
+        a = (round(x0, ndigits), round(y0, ndigits))
+        b = (round(x1, ndigits), round(y1, ndigits))
+        p0, p1 = sorted([a, b])  # order-invariant
+
+        return (p0[0], p0[1], p1[0], p1[1], len(coords))
+    except Exception:
+        return None
+
+
+def _all_points_close(g1, g2, eps=1e-8):
+    """
+    True se due LineString hanno stesso numero di punti e,
+    per ogni punto, abs(dx) < eps e abs(dy) < eps.
+    Considera anche il caso invertito (linea reversed).
+    """
+    try:
+        if (
+            g1 is None or g2 is None
+            or g1.is_empty or g2.is_empty
+            or g1.geom_type != "LineString" or g2.geom_type != "LineString"
+        ):
+            return False
+
+        c1 = list(g1.coords)
+        c2 = list(g2.coords)
+
+        if len(c1) != len(c2) or len(c1) < 2:
+            return False
+
+        def _close(seqA, seqB):
+            for (xA, yA), (xB, yB) in zip(seqA, seqB):
+                if abs(xA - xB) >= eps or abs(yA - yB) >= eps:
+                    return False
+            return True
+
+        return _close(c1, c2) or _close(c1, c2[::-1])
+    except Exception:
+        return False
+    
 def prepare_substation_df(df_all_substations):
     """
     Prepare raw substations dataframe to the structure compatible with PyPSA-
@@ -946,26 +999,13 @@ def clean_data(
     # load cables only if data are stored
     if os.path.getsize(input_files["cables"]) > 0:
         logger.info("Add OSM cables to data")
-        # Load raw data lines
+        # Load raw data cables
         df_cables = load_network_data("cables", data_options)
 
         # prepare cables dataframe and data types
         df_cables = prepare_lines_df(df_cables)
         df_cables = finalize_lines_type(df_cables)
 
-        # --- DEBUG: controlla line_id prima del concat ---
-        print("=== DF LINES ===")
-        print(df_lines[["line_id"]].head(20))
-        print("Duplicati lines:", df_lines["line_id"].duplicated().sum())
-
-        print("=== DF CABLES ===")
-        print(df_cables[["line_id"]].head(20))
-        print("Duplicati cables:", df_cables["line_id"].duplicated().sum())
-        
-        print("Colonne df_lines:", df_lines.columns.tolist())
-        print("Colonne df_cables:", df_cables.columns.tolist())
-        print("Duplicati colonne df_lines:", df_lines.columns[df_lines.columns.duplicated()])
-        print("Duplicati colonne df_cables:", df_cables.columns[df_cables.columns.duplicated()])
         # Rimuove colonne duplicate mantenendo la prima
         df_lines = df_lines.loc[:, ~df_lines.columns.duplicated()].copy()
         df_cables = df_cables.loc[:, ~df_cables.columns.duplicated()].copy()
@@ -974,6 +1014,137 @@ def clean_data(
         df_all_lines = pd.concat([df_lines, df_cables], ignore_index=True)
     else:
         logger.info("No OSM cables to add: skipping")
+
+    # ------------------------------------------------------------
+    # DROP linee OSM per line_id (PRIMA di integrate_lines_df)
+    # ------------------------------------------------------------
+    drop_line_ids = [
+        136528666, 257783843, 257783841, 303661162,
+        137729287, 257781200, 257781203, 129927639
+    ]
+
+    if (not df_all_lines.empty) and ("line_id" in df_all_lines.columns):
+        line_id_num = pd.to_numeric(df_all_lines["line_id"], errors="coerce")
+        hit_mask = line_id_num.isin(drop_line_ids)
+        n_hits = int(hit_mask.sum())
+
+        if n_hits == 0:
+            logger.warning(
+                f"[DROP CHECK] Nessuna feature trovata con line_id in drop_line_ids={drop_line_ids}"
+            )
+        else:
+            logger.info(f"[DROP CHECK] Trovate {n_hits} feature da droppare (prima di integrate_lines_df).")
+            cols_to_show = [c for c in ["line_id", "tag_type", "voltage", "tag_frequency", "country"] if c in df_all_lines.columns]
+            logger.info(
+                "[DROP CHECK] Esempio righe che verranno droppate:\n"
+                + df_all_lines.loc[hit_mask, cols_to_show].head(20).to_string(index=False)
+            )
+
+        before = len(df_all_lines)
+        df_all_lines = df_all_lines.loc[~hit_mask].copy()
+        after = len(df_all_lines)
+        logger.info(f"[DROP CHECK] Droppate {before - after} righe. Rimaste: {after}")
+
+    # ------------------------------------------------------------
+    # DEDUP: duplicates from per-country OSM extracts
+    # Step 1: candidate duplicates by all columns except geometry ("same attributes")
+    # Step 2: within those, require near-equal geometry via endpoint signature (fast)
+    # Step 3: final guard: point-by-point abs diff < eps (slow but safe)
+    # ------------------------------------------------------------
+    if (not df_all_lines.empty) and ("geometry" in df_all_lines.columns):
+
+        # --- Step 1: candidate duplicates by all columns except geometry ---
+        exclude_cols = {"geometry", "country", "Region"}
+        exclude_cols = {c for c in exclude_cols if c in df_all_lines.columns}
+
+        compare_cols = [c for c in df_all_lines.columns if c not in exclude_cols]
+
+        # Normalize to avoid 3 vs 3.0 (or "3") preventing dedup
+        if "cables" in compare_cols and "cables" in df_all_lines.columns:
+            df_all_lines["cables"] = pd.to_numeric(df_all_lines["cables"], errors="coerce")
+
+        if "circuits" in compare_cols and "circuits" in df_all_lines.columns:
+            df_all_lines["circuits"] = pd.to_numeric(df_all_lines["circuits"], errors="coerce")
+
+        cand_mask = df_all_lines.duplicated(subset=compare_cols, keep=False)
+
+        if cand_mask.any():
+
+            df_all_lines["_sig_endpoints"] = df_all_lines["geometry"].map(_endpoints_signature)
+            key_cols = compare_cols + ["_sig_endpoints"]
+            predup_mask = df_all_lines.duplicated(subset=key_cols, keep=False)
+            before = len(df_all_lines)
+
+            if predup_mask.any():
+                df_pre = df_all_lines.loc[predup_mask].copy()
+
+                # We will drop rows that are "true duplicates" of the first one in each group
+                to_drop_idx = []
+
+                # groupby on key (same attrs + same endpoints signature)
+                for _, grp in df_pre.groupby(key_cols, dropna=False):
+                    if len(grp) <= 1:
+                        continue
+
+                    # Keep first row as reference
+                    ref_idx = grp.index[0]
+                    ref_geom = df_all_lines.at[ref_idx, "geometry"]
+
+                    # Compare all others to reference using point-by-point check
+                    for idx in grp.index[1:]:
+                        g = df_all_lines.at[idx, "geometry"]
+                        if _all_points_close(ref_geom, g, eps=1e-8):
+                            to_drop_idx.append(idx)
+                        else:
+                            # Not identical point-by-point => keep it (do NOT drop)
+                            pass
+
+                if to_drop_idx:
+                    dropped = df_all_lines.loc[to_drop_idx].copy()
+                    df_all_lines = df_all_lines.drop(index=to_drop_idx).copy()
+
+                    logger.info(
+                        f"[X-BORDER DEDUP] Dropped {len(to_drop_idx)} rows "
+                        f"(same non-geometry cols + same endpoints sig + all points within eps). "
+                        f"Remaining: {len(df_all_lines)}"
+                    )
+                    run_name = snakemake.config["run"]["name"]
+
+                    dropped_dir = os.path.join("resources", run_name, "osm")
+                    os.makedirs(dropped_dir, exist_ok=True)
+
+                    dropped_path = os.path.join(
+                        dropped_dir,
+                        "dropped_crossborder_lines.csv"
+                    )
+
+                    dropped.drop(columns=["_sig_endpoints"], errors="ignore").to_csv(dropped_path, index=False)
+                    logger.info(f"[X-BORDER DEDUP] Saved dropped duplicates to {dropped_path}")
+
+                    # --- GEOJSON ---
+                    dropped_geojson_path = os.path.join(dropped_dir, "dropped_crossborder_lines.geojson")
+
+                    # assicurati che sia GeoDataFrame con geometry e CRS
+                    dropped_gdf = gpd.GeoDataFrame(
+                        dropped.drop(columns=["_sig_endpoints"], errors="ignore").copy(),
+                        geometry="geometry",
+                        crs=df_all_lines.crs,   # usa lo stesso CRS del df principale
+                    )
+
+                    # salva in GeoJSON
+                    dropped_gdf.to_file(dropped_geojson_path, driver="GeoJSON")
+                    logger.info(f"[X-BORDER DEDUP] Saved dropped duplicates (GeoJSON) to {dropped_geojson_path}")
+                else:
+                    logger.info(
+                        "[X-BORDER DEDUP] No rows dropped after point-by-point eps check "
+                        "(endpoint signature matched but full geometry differed)."
+                    )
+            else:
+                logger.info("[X-BORDER DEDUP] No candidate duplicates after endpoint signature filter.")
+
+            # cleanup helper col
+            df_all_lines.drop(columns=["_sig_endpoints"], inplace=True, errors="ignore")
+
 
     if not df_all_lines.empty:
         # Add underground, under_construction, frequency and circuits columns to the dataframe
@@ -1000,7 +1171,7 @@ def clean_data(
             logger.info("Setting lines country name using the GADM shapes")
             df_all_lines = set_countryname_by_shape(df_all_lines, ext_country_shapes)
 
-        # set unique line ids
+        # set unique line ids (qui avviene l'eventuale -1/-2 ecc)
         df_all_lines = set_unique_id(df_all_lines, "line_id")
 
     # save lines output

@@ -557,6 +557,11 @@ def clustering_for_n_clusters(
             )
     else:
         busmap = custom_busmap
+    import sys, pypsa
+    print("DEBUG PYTHON:", sys.executable)
+    print("DEBUG PYPSA :", pypsa.__file__)
+    import pypsa.clustering.spatial as sp
+    print("DEBUG SPATIAL:", sp.__file__)
 
     clustering = get_clustering_from_busmap(
         n,

@@ -143,9 +143,12 @@ def _add_missing_carriers_from_costs(n, costs, carriers):
         costs.columns.to_series().loc[lambda s: s.str.endswith("_emissions")].values
     )
     suptechs = missing_carriers.str.split("-").str[0]
-    emissions = (
-        costs.loc[costs.index.intersection(suptechs), emissions_cols]
-        .reindex(suptechs, fill_value=0.0)
+    #emissions = (
+     #   costs.loc[costs.index.intersection(suptechs), emissions_cols]
+      #  .reindex(suptechs, fill_value=0.0)
+    #)
+    emissions = costs.loc[costs.index.intersection(suptechs), emissions_cols].reindex(
+        suptechs, fill_value=0.0
     )
     emissions.index = missing_carriers
     n.import_components_from_dataframe(emissions, "Carrier")
@@ -155,8 +158,10 @@ def load_costs(tech_costs, config, elec_config, Nyears=1):
     Set all asset costs and other parameters.
     """
     #costs = pd.read_csv(tech_costs, index_col=["technology", "parameter"], error_bad_lines=False).sort_index()
-    costs = pd.read_csv(tech_costs, index_col=["technology", "parameter"], sep=",").sort_index()
-
+    #costs = pd.read_csv(tech_costs, index_col=["technology", "parameter"], sep=",").sort_index()
+    costs = pd.read_csv(
+        tech_costs, index_col=["technology", "parameter"], sep=","
+    ).sort_index()
     # correct units to MW and output_currency
     costs.loc[costs.unit.str.contains("/kW"), "value"] *= 1e3
     #costs.loc[costs.unit.str.contains("/kW"), "value"] = pd.to_numeric(costs.loc[costs.unit.str.contains("/kW"), "value"]) * 1e3
@@ -565,6 +570,19 @@ def attach_conventional_generators(
         build_year=ppl.datein.fillna(0).astype(int),
         lifetime=(ppl.dateout - ppl.datein).fillna(np.inf),
     )
+    # dopo n.madd(...)
+    if "p_max_pu" not in n.generators_t:
+        n.generators_t.p_max_pu = pd.DataFrame(index=n.snapshots)
+
+    car = ppl.carrier.astype(str).str.lower()
+
+    biomass_i = ppl.index[car == "biomass"]
+    if len(biomass_i):
+        n.generators_t.p_max_pu[biomass_i] = 0.5
+
+    geo_i = ppl.index[car == "geothermal"]
+    if len(geo_i):
+        n.generators_t.p_max_pu[geo_i] = 0.6
 
     for carrier in conventional_config:
         # Generators with technology affected
@@ -594,12 +612,23 @@ def attach_hydro(n, costs, ppl):
 
     _add_missing_carriers_from_costs(n, costs, carriers)
 
-    ppl = (
+    """ ppl = (
         ppl.query('carrier == "hydro"')
         .assign(ppl_id=lambda df: df.index)
         .reset_index(drop=True)
         .rename(index=lambda s: str(s) + " hydro")
+    ) """
+    ppl = ppl.query('carrier == "hydro"').copy()
+
+    # salva l'indice originale (quello che è usato in profile_hydro)
+    ppl["plant_id"] = ppl.index
+
+    # poi riassegna un nuovo index "0 hydro", "1 hydro", ...
+    ppl = (
+        ppl.reset_index(drop=True)
+        .rename(index=lambda s: f"{s} hydro")
     )
+
 
     # Current fix, NaN technologies set to ROR
     if ppl.technology.isna().any():
@@ -616,9 +645,20 @@ def attach_hydro(n, costs, ppl):
 
     inflow_idx = ror.index.union(hydro.index)
     if not inflow_idx.empty:
-        with xr.open_dataarray(snakemake.input.profile_hydro) as inflow:
+        """ with xr.open_dataarray(snakemake.input.profile_hydro) as inflow:
             found_plants = ppl.ppl_id[ppl.ppl_id.isin(inflow.indexes["plant"])]
+            missing_plants_idxs = ppl.index.difference(found_plants.index) """
+        with xr.open_dataarray(snakemake.input.profile_hydro) as inflow:
+            plants_in_inflow = inflow.indexes["plant"]
+
+            # seleziona gli impianti il cui plant_id (indice originale) è presente negli inflow
+            found_plants = ppl.plant_id[ppl.plant_id.isin(plants_in_inflow)]
+
+            # gli indici di ppl che NON hanno inflow
             missing_plants_idxs = ppl.index.difference(found_plants.index)
+
+            print("found_plants:", len(found_plants))
+            print("missing_plants:", len(missing_plants_idxs))
 
             # if missing time series are found, notify the user and exclude missing hydro plants
             if not missing_plants_idxs.empty:

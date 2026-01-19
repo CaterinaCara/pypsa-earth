@@ -150,9 +150,14 @@ def simplify_network_to_base_voltage(n, linetype, base_voltage):
     )
 
     # Replace transformers by lines
+    
     trafo_map = pd.Series(n.transformers.bus1.values, n.transformers.bus0.values)
     trafo_map = trafo_map[~trafo_map.index.duplicated(keep="first")]
-    several_trafo_b = trafo_map.isin(trafo_map.index)
+    #several_trafo_b = trafo_map.isin(trafo_map.index)
+    several_trafo_b = trafo_map.isin(trafo_map.index) & (trafo_map != trafo_map.index)
+    while several_trafo_b.any():
+        trafo_map[several_trafo_b] = trafo_map[several_trafo_b].map(trafo_map)
+        several_trafo_b = trafo_map.isin(trafo_map.index) & (trafo_map != trafo_map.index)
     trafo_map[several_trafo_b] = trafo_map[several_trafo_b].map(trafo_map)
     missing_buses_i = n.buses.index.difference(trafo_map.index)
     trafo_map = pd.concat([trafo_map, pd.Series(missing_buses_i, missing_buses_i)])
@@ -454,9 +459,19 @@ def simplify_links(
             if dc_as_links:
                 p_max_pu = config_links.get("p_max_pu", 1.0)
                 lengths = n.links.loc[all_links, "length"]
-                i_links = [i for _, i in sum(dc_edges, []) if _ == "Link"]
-                length = sum(n.links.loc[i_links, "length"].mean() for l in dc_edges)
-                p_nom = min(n.links.loc[i_links, "p_nom"].sum() for l in dc_edges)
+                i_links = [i for _, i in sum(dc_edges, []) if _ == "Link"] # --> we think that this line is now useless and could be removed
+                #length = sum(n.links.loc[i_links, "length"].mean() for l in dc_edges) --> this line has been replaced (see below)
+                #p_nom = min(n.links.loc[i_links, "p_nom"].sum() for l in dc_edges) --> this line has been replaced (see below)
+                length = sum(
+                    n.links.loc[i_links_parallel, "length"].mean()
+                    for l in range(len(dc_edges))
+                    for i_links_parallel in [[i for _, i in dc_edges[l] if _ == "Link"]]
+                )
+                p_nom = min(
+                    n.links.loc[i_links_parallel, "p_nom"].sum()
+                    for l in range(len(dc_edges))
+                    for i_links_parallel in [[i for _, i in dc_edges[l] if _ == "Link"]]
+                )
                 underwater_fraction = (
                     lengths * n.links.loc[all_links, "underwater_fraction"]
                 ).sum() / lengths.sum()

@@ -236,9 +236,24 @@ def check_cutout_match(cutout, geodf):
             "More details on cutout generation are available in docs:\n\r"
             "https://pypsa-earth.readthedocs.io/en/latest/tutorial.html"
         )
-
-
 def get_eia_annual_hydro_generation(fn, countries):
+    # in billion kWh/a = TWh/a
+    df = pd.read_csv(fn, skiprows=1, index_col=1, na_values=[" ", "--"]).iloc[1:, 1:]
+    df.index = df.index.str.strip()
+ 
+    df.loc["Germany"] = df.filter(like="Germany", axis=0).astype(float).sum()
+    df.loc["Serbia"] += df.loc["Kosovo"]
+    df = df.loc[~df.index.str.contains("Former")]
+    df.drop(["World", "Germany, West", "Germany, East"], inplace=True)
+ 
+    df.index = cc.convert(df.index, to="iso2")
+    df.index.name = "countries"
+ 
+    df = df.T[countries].astype(float) * 1e6  # in MWh/a
+    df.index = df.index.astype(int)
+    return df
+
+""" def get_eia_annual_hydro_generation(fn, countries):
     # in billion kWh/a = TWh/a
     df = pd.read_csv(fn, skiprows=1, index_col=1, na_values=[" ", "--"]).iloc[1:, 1:]
     df.index = df.index.str.strip()
@@ -254,7 +269,7 @@ def get_eia_annual_hydro_generation(fn, countries):
     df = df.T[countries] * 1e6  # in MWh/a
     df.index = df.index.astype(int)
 
-    return df
+    return df """
 
 
 def get_hydro_capacities_annual_hydro_generation(fn, countries, year):

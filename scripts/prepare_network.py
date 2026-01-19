@@ -330,6 +330,286 @@ def set_line_nom_max(n, lines, links):
     n.lines.s_nom_max = n.lines.s_nom_max.clip(lower=s_min, upper=s_max)
     n.links.p_nom_max = n.links.p_nom_max.clip(lower=p_min, upper=p_max)
 
+def set_ccgt_it_pminpu_share_of_load(n, share=0.35, cap_upper=1.0):
+    """
+    Impone per ogni snapshot t:
+      sum_{g in CCGT, IT} p[g,t] >= share * Load_IT[t]
+    distribuendo il minimo proporzionalmente a p_nom via p_min_pu(t) uguale per tutti i CCGT IT.
+
+    Richiede CCGT non-extendable (p_nom fisso).
+    """
+
+    # 1) Seleziona generatori CCGT in Italia (robusto: usa country del bus)
+    sel_g = (n.generators.carrier == "CCGT") & (n.generators.bus.map(n.buses.country) == "IT")
+    gens = n.generators.index[sel_g]
+    if len(gens) == 0:
+        logger.warning("No Italian CCGT generators found; skipping dynamic p_min_pu.")
+        return
+
+    # 2) Seleziona load in Italia e costruisci Load_IT(t)
+    it_buses = n.buses.index[n.buses.country == "IT"]
+    it_loads = n.loads.index[n.loads.bus.isin(it_buses)]
+    if len(it_loads) == 0:
+        logger.warning("No Italian loads found; skipping dynamic p_min_pu.")
+        return
+
+    load_it = n.loads_t.p_set[it_loads].sum(axis=1)  # Series su snapshots
+
+    # 3) Denominatore: somma capacità CCGT IT (nota e fissa)
+    denom = float(n.generators.loc[gens, "p_nom"].sum())
+    if denom <= 0:
+        raise ValueError("Sum of p_nom for Italian CCGT is <= 0; cannot compute p_min_pu(t).")
+
+    # 4) p_min_pu(t)
+    pmin = (share * load_it / denom).clip(lower=0.0, upper=cap_upper)
+
+    # 5) Crea/inizializza p_min_pu time-series se manca
+    if "p_min_pu" not in n.generators_t:
+        n.generators_t.p_min_pu = pd.DataFrame(0.0, index=n.snapshots, columns=n.generators.index)
+    else:
+        n.generators_t.p_min_pu = n.generators_t.p_min_pu.reindex(
+            index=n.snapshots, columns=n.generators.index, fill_value=0.0
+        )
+
+    # 6) Assegna la stessa serie a tutti i CCGT IT (broadcast per colonne)
+    n.generators_t.p_min_pu.loc[:, gens] = pmin.to_numpy()[:, None]
+
+    logger.info(
+        f"Set p_min_pu(t)= {share}*Load_IT(t)/sum(p_nom_CCGT_IT) for {len(gens)} Italian CCGT gens "
+        f"(denom={denom:.2f})."
+    )
+
+def set_ccgt_it_bus_pminpu_from_bus_load(n, share=0.35, cap_upper=1.0, use_p_nom_opt=False):
+    """
+    Per ogni bus IT:
+      p_min_pu_ccgt_bus(t) = share * Load_bus(t) / SumCap_CCGT_bus
+    e la assegna a tutti i CCGT di quel bus (uguale per tutti i CCGT sul bus).
+
+    Risultato implicito:
+      sum_{CCGT on bus} p(t) >= share * Load_bus(t)
+    """
+
+    it_buses = n.buses.index[n.buses.country == "IT"]
+
+    # Load aggregato per bus: (t x load) -> (t x bus)
+    it_loads = n.loads.index[n.loads.bus.isin(it_buses)]
+    if len(it_loads) == 0:
+        logger.warning("No IT loads found; skipping buswise CCGT p_min_pu.")
+        return
+
+    load_by_bus = n.loads_t.p_set[it_loads].groupby(n.loads.loc[it_loads, "bus"], axis=1).sum()
+
+    # CCGT IT
+    it_ccgt = n.generators.index[
+        (n.generators.carrier == "CCGT") & (n.generators.bus.isin(it_buses))
+    ]
+    if len(it_ccgt) == 0:
+        logger.warning("No IT CCGT generators found; skipping buswise CCGT p_min_pu.")
+        return
+
+    # quale colonna capacità usare
+    cap_col = "p_nom_opt" if use_p_nom_opt and "p_nom_opt" in n.generators.columns else "p_nom"
+
+    # Inizializza p_min_pu(t,g)
+    if "p_min_pu" not in n.generators_t:
+        n.generators_t.p_min_pu = pd.DataFrame(0.0, index=n.snapshots, columns=n.generators.index)
+    else:
+        n.generators_t.p_min_pu = n.generators_t.p_min_pu.reindex(
+            index=n.snapshots, columns=n.generators.index, fill_value=0.0
+        )
+
+    n_set = 0
+    for b in it_buses:
+        gens_b = it_ccgt[n.generators.loc[it_ccgt, "bus"] == b]
+        if len(gens_b) == 0:
+            continue
+
+        # carico del bus (se non c'è load sul bus, skip)
+        if b not in load_by_bus.columns:
+            continue
+        load_b = load_by_bus[b]
+
+        # capacità CCGT sul bus
+        denom_b = float(n.generators.loc[gens_b, cap_col].sum())
+        if denom_b <= 0:
+            continue
+
+        pmin_b = (share * load_b / denom_b).clip(lower=0.0, upper=cap_upper)
+
+        # assegna a tutti i CCGT del bus
+        n.generators_t.p_min_pu.loc[:, gens_b] = pmin_b.to_numpy()[:, None]
+        n_set += len(gens_b)
+
+    logger.info(f"Set buswise IT CCGT p_min_pu(t)= {share}*Load_bus(t)/SumCap_CCGT_bus for {n_set} generators.")
+
+def set_it_thermal_pmaxpu_cap(n, carriers=("CCGT", "OCGT", "coal", "oil"), cap=0.9):
+    """
+    Imposta p_max_pu(t,g)=cap per i generatori in IT con carrier in `carriers`.
+    Non tocca gli altri generatori.
+    """
+    # --- robustezza: se l'utente passa "coal" invece di ("coal",) ---
+    if isinstance(carriers, str):
+        carriers = (carriers,)
+
+    # --- robustezza: identificazione bus IT ---
+    # Prova prima con buses.country == "IT"; se non funziona, fallback su prefisso bus "IT"
+    bus_country = n.generators.bus.map(n.buses.country) if "country" in n.buses.columns else None
+
+    it_mask = None
+    if bus_country is not None:
+        # gestisce NaN e valori tipo "IT0"
+        it_mask = bus_country.astype(str).str.startswith("IT")
+    else:
+        it_mask = n.generators.bus.astype(str).str.startswith("IT")
+
+    carrier_mask = n.generators.carrier.isin(list(carriers))
+    sel = it_mask & carrier_mask
+    gens = n.generators.index[sel]
+
+    # --- log diagnostici (puoi lasciarli o commentarli dopo) ---
+    logger.info("Requested carriers=%s cap=%s", carriers, cap)
+    logger.info("IT generators found=%d | carrier-match found=%d | both=%d",
+                int(it_mask.sum()), int(carrier_mask.sum()), len(gens))
+
+    if len(gens) == 0:
+        logger.warning("No IT generators found for carriers %s; skipping p_max_pu cap.", carriers)
+        return
+
+    # Assicura che esista la tabella p_max_pu (t x generatori)
+    if "p_max_pu" not in n.generators_t:
+        n.generators_t.p_max_pu = pd.DataFrame(1.0, index=n.snapshots, columns=n.generators.index)
+    else:
+        n.generators_t.p_max_pu = n.generators_t.p_max_pu.reindex(index=n.snapshots, columns=n.generators.index)
+        n.generators_t.p_max_pu = n.generators_t.p_max_pu.fillna(1.0)
+
+    # Applica cap SOLO ai generatori selezionati
+    n.generators_t.p_max_pu.loc[:, gens] = cap
+    logger.info("Set p_max_pu(t)=%s for %d IT generators (%s).", cap, len(gens), ", ".join(map(str, carriers)))
+
+def set_thermal_pmaxpu_cap_all(
+    n,
+    carriers=("coal",),
+    cap=0.9
+):
+    """
+    Imposta p_max_pu(t,g)=cap per tutti i generatori
+    con carrier in `carriers`, indipendentemente dal paese.
+    """
+
+    # robustezza: se l'utente passa "coal" invece di ("coal",)
+    if isinstance(carriers, str):
+        carriers = (carriers,)
+
+    carrier_mask = n.generators.carrier.isin(list(carriers))
+    gens = n.generators.index[carrier_mask]
+
+    logger.info(
+        "Requested carriers=%s cap=%s | generators found=%d",
+        carriers, cap, len(gens)
+    )
+
+    if len(gens) == 0:
+        logger.warning(
+            "No generators found for carriers %s; skipping p_max_pu cap.",
+            carriers
+        )
+        return
+
+    # Assicura che esista p_max_pu (t x generatori)
+    if "p_max_pu" not in n.generators_t:
+        n.generators_t.p_max_pu = pd.DataFrame(
+            1.0,
+            index=n.snapshots,
+            columns=n.generators.index
+        )
+    else:
+        n.generators_t.p_max_pu = (
+            n.generators_t.p_max_pu
+            .reindex(index=n.snapshots, columns=n.generators.index)
+            .fillna(1.0)
+        )
+
+    # Applica cap SOLO ai generatori selezionati
+    n.generators_t.p_max_pu.loc[:, gens] = cap
+
+    logger.info(
+        "Set p_max_pu(t)=%s for %d generators (%s).",
+        cap, len(gens), ", ".join(map(str, carriers))
+    )
+
+def set_it_interconnection_limits(
+    n,
+    s_max_pu_it_internal=None,
+    s_max_pu_it_crossborder=None,
+    p_max_pu_it_internal=None,
+    p_max_pu_it_crossborder=None,
+    apply_to_ac_lines=True,
+    apply_to_dc_links=True,
+    dc_link_carriers=("DC",),
+):
+    """
+    Imposta s_max_pu (Lines) e p_max_pu (Links) con valori diversi per:
+      - IT↔IT (interno Italia)
+      - IT↔estero (cross-border)
+
+    Se un parametro è None, quella parte non viene modificata.
+
+    Note:
+    - Lines: tipicamente AC
+    - Links: tipicamente DC (carrier "DC"), ma puoi passare altri carrier.
+    """
+
+    # --- Lines (AC) ---
+    if apply_to_ac_lines and (not n.lines.empty) and (
+        s_max_pu_it_internal is not None or s_max_pu_it_crossborder is not None
+    ):
+        c0 = n.lines.bus0.map(n.buses.country)
+        c1 = n.lines.bus1.map(n.buses.country)
+
+        is_it_it = (c0 == "IT") & (c1 == "IT")
+        is_it_xb = ((c0 == "IT") & (c1 != "IT")) | ((c0 != "IT") & (c1 == "IT"))
+
+        if s_max_pu_it_internal is not None:
+            n.lines.loc[is_it_it, "s_max_pu"] = float(s_max_pu_it_internal)
+
+        if s_max_pu_it_crossborder is not None:
+            n.lines.loc[is_it_xb, "s_max_pu"] = float(s_max_pu_it_crossborder)
+
+        logger.info(
+            "Set lines s_max_pu: IT-IT=%s (%d lines), IT-xborder=%s (%d lines).",
+            s_max_pu_it_internal, int(is_it_it.sum()),
+            s_max_pu_it_crossborder, int(is_it_xb.sum()),
+        )
+
+    # --- Links (DC) ---
+    if apply_to_dc_links and (not n.links.empty) and (
+        p_max_pu_it_internal is not None or p_max_pu_it_crossborder is not None
+    ):
+        # filtra solo i link "di interconnessione" (tipicamente DC)
+        links_sel = n.links.carrier.isin(dc_link_carriers)
+        links = n.links.index[links_sel]
+
+        if len(links) > 0:
+            c0 = n.links.loc[links, "bus0"].map(n.buses.country)
+            c1 = n.links.loc[links, "bus1"].map(n.buses.country)
+
+            is_it_it = (c0 == "IT") & (c1 == "IT")
+            is_it_xb = ((c0 == "IT") & (c1 != "IT")) | ((c0 != "IT") & (c1 == "IT"))
+
+            if p_max_pu_it_internal is not None:
+                n.links.loc[links[is_it_it], "p_max_pu"] = float(p_max_pu_it_internal)
+
+            if p_max_pu_it_crossborder is not None:
+                n.links.loc[links[is_it_xb], "p_max_pu"] = float(p_max_pu_it_crossborder)
+
+            logger.info(
+                "Set DC links p_max_pu: IT-IT=%s (%d links), IT-xborder=%s (%d links).",
+                p_max_pu_it_internal, int(is_it_it.sum()),
+                p_max_pu_it_crossborder, int(is_it_xb.sum()),
+            )
+        else:
+            logger.info("No DC links found with carriers=%s; skipping links p_max_pu.", dc_link_carriers)
+
 
 if __name__ == "__main__":
     if "snakemake" not in globals():
@@ -452,6 +732,26 @@ if __name__ == "__main__":
 
     sanitize_carriers(n, snakemake.config)
     sanitize_locations(n)
+    #set_ccgt_it_pminpu_share_of_load(n, share=0.35)
+    #set_ccgt_it_bus_pminpu_from_bus_load(n, share=0.152, cap_upper=1.0, use_p_nom_opt=False)
+    #set_it_thermal_pmaxpu_cap(n, carriers=["coal"], cap=0.7)
+    set_thermal_pmaxpu_cap_all(n, carriers="coal", cap=0.7)
+    # dopo i settaggi globali (se li tieni)
+    set_line_s_max_pu(n, snakemake.params.lines["s_max_pu"])
+    if not n.links.empty:
+        n.links.loc[n.links.carrier == "DC", "p_max_pu"] = snakemake.params.links["p_max_pu"]
+
+    # override selettivo IT
+    set_it_interconnection_limits(
+        n,
+        s_max_pu_it_internal=1,      # IT-IT (Lines)
+        s_max_pu_it_crossborder=0.40,   # IT-ESTERO (Lines)
+        p_max_pu_it_internal=1,      # IT-IT (DC Links)
+        p_max_pu_it_crossborder=0.50,   # IT-ESTERO (DC Links)
+        apply_to_ac_lines=True,
+        apply_to_dc_links=True,
+        dc_link_carriers=("DC",),
+    )
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])
