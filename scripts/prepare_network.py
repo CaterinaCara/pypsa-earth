@@ -735,7 +735,7 @@ if __name__ == "__main__":
     #set_ccgt_it_pminpu_share_of_load(n, share=0.35)
     #set_ccgt_it_bus_pminpu_from_bus_load(n, share=0.152, cap_upper=1.0, use_p_nom_opt=False)
     #set_it_thermal_pmaxpu_cap(n, carriers=["coal"], cap=0.7)
-    set_thermal_pmaxpu_cap_all(n, carriers="coal", cap=0.7)
+    #set_thermal_pmaxpu_cap_all(n, carriers="coal", cap=0.7)
     # dopo i settaggi globali (se li tieni)
     set_line_s_max_pu(n, snakemake.params.lines["s_max_pu"])
     if not n.links.empty:
@@ -745,7 +745,7 @@ if __name__ == "__main__":
     set_it_interconnection_limits(
         n,
         s_max_pu_it_internal=1,      # IT-IT (Lines)
-        s_max_pu_it_crossborder=0.40,   # IT-ESTERO (Lines)
+        s_max_pu_it_crossborder=0.50, #0.40,   # IT-ESTERO (Lines)
         p_max_pu_it_internal=1,      # IT-IT (DC Links)
         p_max_pu_it_crossborder=0.50,   # IT-ESTERO (DC Links)
         apply_to_ac_lines=True,
