@@ -4,6 +4,7 @@
 
 import sys
 import os
+import re
 import warnings
 import pathlib
 
@@ -507,12 +508,13 @@ rule build_renewable_profiles:
         gebco="data/gebco/GEBCO_2025_sub_ice.nc",
         country_shapes="resources/" + RDIR + "shapes/country_shapes.geojson",
         offshore_shapes="resources/" + RDIR + "shapes/offshore_shapes.geojson",
+        hydrolakes_shapes="data/hydrolakes_shapes.geojson",
         hydro_capacities="data/hydro_capacities.csv",
         eia_hydro_generation="data/eia_hydro_annual_generation.csv",
         powerplants="resources/" + RDIR + "powerplants.csv",
         regions=lambda w: (
             "resources/" + RDIR + "bus_regions/regions_onshore.geojson"
-            if w.technology in ("onwind", "solar", "hydro", "csp")
+            if w.technology in ("onwind", "solar", "hydro", "csp", "FPVinnerbasin")
             else "resources/" + RDIR + "bus_regions/regions_offshore.geojson"
         ),
         cutout=lambda w: "cutouts/"
