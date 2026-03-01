@@ -253,23 +253,6 @@ def get_eia_annual_hydro_generation(fn, countries):
     df.index = df.index.astype(int)
     return df
 
-""" def get_eia_annual_hydro_generation(fn, countries):
-    # in billion kWh/a = TWh/a
-    df = pd.read_csv(fn, skiprows=1, index_col=1, na_values=[" ", "--"]).iloc[1:, 1:]
-    df.index = df.index.str.strip()
-
-    df.loc["Germany"] = df.filter(like="Germany", axis=0).sum()
-    df.loc["Serbia"] += df.loc["Kosovo"]
-    df = df.loc[~df.index.str.contains("Former")]
-    df.drop(["World", "Germany, West", "Germany, East"], inplace=True)
-
-    df.index = cc.convert(df.index, to="iso2")
-    df.index.name = "countries"
-
-    df = df.T[countries] * 1e6  # in MWh/a
-    df.index = df.index.astype(int)
-
-    return df """
 
 
 def get_hydro_capacities_annual_hydro_generation(fn, countries, year):
@@ -664,6 +647,22 @@ if __name__ == "__main__":
         capacity_per_sqkm = config["capacity_per_sqkm"]
 
         excluder = atlite.ExclusionContainer(crs=area_crs, res=100)
+
+                # --- FPV inner basin: keep ONLY HydroLAKES polygons ---
+        if snakemake.wildcards.technology == "FPVinnerbasin":
+            hydrolakes = gpd.read_file(paths.hydrolakes_shapes)
+
+            if hydrolakes.crs is None:
+                hydrolakes = hydrolakes.set_crs(geo_crs)
+
+            hydrolakes = hydrolakes.to_crs(geo_crs)
+
+            minx, miny, maxx, maxy = regions.total_bounds
+            hydrolakes = hydrolakes.cx[minx:maxx, miny:maxy]
+
+            hydrolakes["geometry"] = hydrolakes["geometry"].buffer(0)
+
+            excluder.add_geometry(hydrolakes, invert=True)
 
         if "natura" in config and config["natura"]:
             excluder.add_raster(paths.natura, nodata=0, allow_no_overlap=True)
