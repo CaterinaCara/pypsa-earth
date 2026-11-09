@@ -827,6 +827,7 @@ if config["monte_carlo"]["options"].get("add_to_snakefile", False) == False:
         input:
             overrides=BASE_DIR + "/data/override_component_attrs",
             network="networks/" + RDIR + "elec_s{simpl}_{clusters}_ec_l{ll}_{opts}.nc",
+            #agg_p_nom_minmax=config["electricity"]["agg_p_nom_limits"]["file"],
             tech_costs=COSTS,
         output:
             "results/" + RDIR + "networks/elec_s{simpl}_{clusters}_ec_l{ll}_{opts}.nc",
@@ -845,7 +846,7 @@ if config["monte_carlo"]["options"].get("add_to_snakefile", False) == False:
                 + RDIR
                 + "solve_network/elec_s{simpl}_{clusters}_ec_l{ll}_{opts}"
             )
-        threads: 20
+        threads: 1 #20
         resources:
             mem=memory,
         shadow:
@@ -859,8 +860,12 @@ if config["monte_carlo"]["options"].get("add_to_snakefile", False) == True:
     rule monte_carlo:
         params:
             monte_carlo=config["monte_carlo"],
+            costs=config["costs"],
+            electricity=config["electricity"],
         input:
-            "networks/" + RDIR + "elec_s{simpl}_{clusters}_ec_l{ll}_{opts}.nc",
+            network="networks/" + RDIR + "elec_s{simpl}_{clusters}_ec_l{ll}_{opts}.nc",
+            tech_costs=COSTS,
+           # agg_p_nom_minmax=config["electricity"]["agg_p_nom_limits"]["file"],
         output:
             "networks/" + RDIR + "elec_s{simpl}_{clusters}_ec_l{ll}_{opts}_{unc}.nc",
         log:
@@ -898,6 +903,7 @@ if config["monte_carlo"]["options"].get("add_to_snakefile", False) == True:
             network="networks/"
             + RDIR
             + "elec_s{simpl}_{clusters}_ec_l{ll}_{opts}_{unc}.nc",
+            #agg_p_nom_minmax=config["electricity"]["agg_p_nom_limits"]["file"],
             tech_costs=COSTS,
         output:
             "results/"
@@ -921,7 +927,7 @@ if config["monte_carlo"]["options"].get("add_to_snakefile", False) == True:
                 + RDIR
                 + "solve_network/elec_s{simpl}_{clusters}_ec_l{ll}_{opts}_{unc}"
             )
-        threads: 20
+        threads: 16
         resources:
             mem_mb=memory,
         shadow:
