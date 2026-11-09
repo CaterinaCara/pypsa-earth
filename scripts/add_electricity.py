@@ -488,11 +488,29 @@ def attach_wind_and_solar(
                         * costs.at[tech + "-connection-underground", "capital_cost"]
                     )
                 )
+
+                if tech in ["offwind-ac", "offwind-dc"]:
+                    technology_cost = costs.at["offwind", "capital_cost"]
+
+                elif tech == "offwind-FPVsea":
+                    technology_cost = costs.at["offwind-FPVsea", "capital_cost"]
+                else:
+                    raise ValueError(
+                        f"Unsupported offshore technology for capital cost calculation: {tech}"
+                    )
+
                 capital_cost = (
-                    costs.at["offwind", "capital_cost"]
+                    technology_cost
                     + costs.at[tech + "-station", "capital_cost"]
                     + connection_cost
                 )
+
+                #capital_cost = (
+                #    costs.at["offwind", "capital_cost"]
+                #    + costs.at[tech + "-station", "capital_cost"]
+                #    + connection_cost
+                #)
+
                 logger.info(
                     "Added connection cost of {:0.0f}-{:0.0f} {}/MW/a to {}".format(
                         connection_cost.min(),
@@ -989,6 +1007,19 @@ if __name__ == "__main__":
         snakemake.params.electricity,
         Nyears,
     )
+    
+    rt_bichargers = [
+        "CAES-bicharger",
+        "FLYWHEEL-bicharger",
+        "V-RX-bicharger",
+        "LI-ION-bicharger",
+    ]
+
+    for tech in rt_bichargers:
+        if tech in costs.index and pd.notna(costs.at[tech, "efficiency"]):
+            costs.at[tech, "efficiency"] = np.sqrt(float(costs.at[tech, "efficiency"]))
+            logger.info(f"{tech} efficiency converted from round-trip to single-pass: {costs.at[tech, 'efficiency']:.4f}")
+    
     ppl = load_powerplants(snakemake.input.powerplants)
     if "renewable_carriers" in snakemake.params.electricity:
         renewable_carriers = set(snakemake.params.electricity["renewable_carriers"])

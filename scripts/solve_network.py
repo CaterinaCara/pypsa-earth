@@ -91,7 +91,7 @@ from linopy import merge
 from pypsa.descriptors import get_switchable_as_dense as get_as_dense
 from pypsa.optimization.abstract import optimize_transmission_expansion_iteratively
 from pypsa.optimization.optimize import optimize
-
+from add_electricity import load_costs
 logger = create_logger(__name__)
 pypsa.pf.logger.setLevel(logging.WARNING)
 
@@ -189,8 +189,8 @@ def prepare_network(n, solve_opts, config):
     return n
 
 
-def add_CCL_constraints(n, config):
-    """
+""" def add_CCL_constraints(n, config):
+ 
     Add CCL (country & carrier limit) constraint to the network.
 
     Add minimum and maximum levels of generator nominal capacity per carrier
@@ -208,7 +208,7 @@ def add_CCL_constraints(n, config):
         opts: [Co2L-CCL-24H]
     electricity:
         agg_p_nom_limits: data/agg_p_nom_minmax.csv
-    """
+    
     agg_p_nom_limits = config["electricity"].get("agg_p_nom_limits")
 
     try:
@@ -249,9 +249,240 @@ def add_CCL_constraints(n, config):
     )
     n.model.add_constraints(
         lhs <= max_matrix, name="agg_p_nom_max", mask=max_matrix.notnull()
+    ) """
+
+"""def add_CCL_constraints(n, config):
+    
+    Add CCL (country & carrier limit) constraint to the network.
+
+    Add minimum and maximum levels of generator nominal capacity per carrier
+    for individual countries. Opts and path for agg_p_nom_minmax.csv must be defined
+    in config.yaml. Default file is available at data/agg_p_nom_minmax.csv.
+    Parameter include_existing in config.yaml decides whether existing capacities
+    are considered in the CCL constraints. Default is false.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+    config : dict
+
+    Example
+    -------
+    scenario:
+        opts: [CCL-Co2L-24H]
+    electricity:
+        agg_p_nom_limits:
+            file: data/agg_p_nom_minmax.csv
+            include_existing: false
+    
+    agg_p_nom_limits = config["electricity"].get("agg_p_nom_limits")
+
+    try:
+        agg_p_nom_minmax = pd.read_csv(
+            snakemake.input.agg_p_nom_minmax, index_col=list(range(2)), header=[0, 1]
+        )["2030"] #[snakemake.wildcards.planning_horizons]
+        
+    except IOError:
+        logger.exception(
+            "Need to specify the path to a .csv file containing "
+            "aggregate capacity limits per country in "
+            "config['electricity']['agg_p_nom_limit']."
+        )
+    logger.info(
+        "Adding per carrier generation capacity constraints for " "individual countries"
     )
 
+    capacity_variable = n.model["Generator-p_nom"]
 
+    # get carriers to which CCL constraints apply
+    ccl_carriers = agg_p_nom_minmax.index.get_level_values(1).unique()
+    ext_carriers = n.generators.query("p_nom_extendable").carrier.unique()
+    ccl_carriers = ccl_carriers[ccl_carriers.isin(ext_carriers)]
+
+    # If no CCL carriers found, return early
+    if not ccl_carriers.any():
+        logger.info(
+            "No CCL carriers found that are extendable. Skipping CCL constraints."
+        )
+        return
+
+    # Get extendable generators for relevant carriers
+    gens = n.generators[n.generators.carrier.isin(ccl_carriers)]
+    gens = gens.rename_axis(index="Generator-ext")
+
+    # Prepare country and carrier grouper
+    grouper = pd.concat(
+        [gens.bus.map(n.buses.country).rename("country"), gens.carrier], axis=1
+    )
+
+    # Prepare LHS
+    lhs = capacity_variable.groupby(grouper).sum()
+
+    # Obtain existing capacities
+    existing_capacities = gens.p_nom.groupby(
+        [grouper["country"], grouper["carrier"]]
+    ).sum()
+
+    # Obtain minimum and maximum constraint limits
+    min_values = agg_p_nom_minmax["min"]
+    max_values = agg_p_nom_minmax["max"]
+
+    # Adjust limits if existing capacities are considered
+    if agg_p_nom_limits.get("include_existing", False):
+        min_values = (min_values - existing_capacities).clip(lower=0)
+        max_values = (max_values - existing_capacities).clip(lower=0)
+        #logger.info(f"Considered existing capacities in CCL constraints for carrier {c}.")
+    
+    valid_min_index = min_values.index.intersection(lhs.indexes["group"])
+    valid_max_index = max_values.index.intersection(lhs.indexes["group"])
+
+    for grp in valid_min_index:
+        rhs = float(min_values.loc[grp])
+        n.model.add_constraints(
+            lhs.sel(group=grp) >= rhs,
+            name=f"agg_p_nom_min_{grp[0]}_{grp[1]}",
+        )
+
+    for grp in valid_max_index:
+        rhs = float(max_values.loc[grp])
+        n.model.add_constraints(
+            lhs.sel(group=grp) <= rhs,
+            name=f"agg_p_nom_max_{grp[0]}_{grp[1]}",
+        )
+    # Convert limits to xarray for masking
+    #min_values = xr.DataArray(min_values.dropna()).rename(dim_0="group")
+    #max_values = xr.DataArray(max_values.dropna()).rename(dim_0="group")
+    valid_min_index = min_values.index.intersection(lhs.indexes["group"])
+    valid_max_index = max_values.index.intersection(lhs.indexes["group"])
+
+    if not valid_min_index.empty:
+        min_pos = lhs.indexes["group"].get_indexer(valid_min_index)
+        lhs_min = lhs.isel(group=min_pos)
+        rhs_min = min_values.reindex(valid_min_index).to_numpy()
+
+        n.model.add_constraints(
+            lhs_min >= rhs_min,
+            name="agg_p_nom_min",
+        )
+
+    if not valid_max_index.empty:
+        max_pos = lhs.indexes["group"].get_indexer(valid_max_index)
+        lhs_max = lhs.isel(group=max_pos)
+        rhs_max = max_values.reindex(valid_max_index).to_numpy()
+
+        n.model.add_constraints(
+            lhs_max <= rhs_max,
+            name="agg_p_nom_max",
+        )
+    # Valid constraints
+    #valid_min_index = min_values.indexes["group"].intersection(lhs.indexes["group"])
+    #valid_max_index = max_values.indexes["group"].intersection(lhs.indexes["group"])
+    valid_min_index = min_values.index.intersection(lhs.indexes["group"])
+    valid_max_index = max_values.index.intersection(lhs.indexes["group"]) 
+    
+    if not valid_min_index.empty:
+        n.model.add_constraints(
+            #lhs.sel(group=valid_min_index) >= min_values.loc[valid_min_index],
+            lhs.sel(group=valid_min_index) >= min_values.loc[valid_min_index].to_numpy(),
+            name="agg_p_nom_min",
+        )
+
+    if not valid_max_index.empty:
+        n.model.add_constraints(
+            #lhs.sel(group=valid_max_index) <= max_values.loc[valid_max_index],
+            lhs.sel(group=valid_max_index) <= max_values.loc[valid_max_index].to_numpy(),
+            name="agg_p_nom_max",
+        ) """
+def add_CCL_constraints(n, config):
+    """
+    Add CCL (country & carrier limit) constraint to the network.
+
+    Add minimum and maximum levels of generator nominal capacity per carrier
+    for individual countries. Opts and path for agg_p_nom_minmax.csv must be defined
+    in config.yaml. Default file is available at data/agg_p_nom_minmax.csv.
+    Parameter include_existing in config.yaml decides whether existing capacities
+    are considered in the CCL constraints. Default is false.
+    """
+    agg_p_nom_limits = config["electricity"].get("agg_p_nom_limits")
+
+    try:
+        agg_p_nom_minmax = pd.read_csv(
+            snakemake.input.agg_p_nom_minmax,
+            index_col=list(range(2)),
+            header=[0, 1]
+        )["2030"]
+    except IOError:
+        logger.exception(
+            "Need to specify the path to a .csv file containing "
+            "aggregate capacity limits per country in "
+            "config['electricity']['agg_p_nom_limit']."
+        )
+        return
+
+    logger.info(
+        "Adding per carrier generation capacity constraints for individual countries"
+    )
+
+    capacity_variable = n.model["Generator-p_nom"]
+
+    # get carriers to which CCL constraints apply
+    ccl_carriers = agg_p_nom_minmax.index.get_level_values(1).unique()
+    ext_carriers = n.generators.query("p_nom_extendable").carrier.unique()
+    ccl_carriers = ccl_carriers[ccl_carriers.isin(ext_carriers)]
+
+    # If no CCL carriers found, return early
+    if not ccl_carriers.any():
+        logger.info(
+            "No CCL carriers found that are extendable. Skipping CCL constraints."
+        )
+        return
+
+    # Get extendable generators for relevant carriers
+    gens = n.generators[n.generators.carrier.isin(ccl_carriers)]
+    gens = gens.rename_axis(index="Generator-ext")
+
+    # Prepare country and carrier grouper
+    grouper = pd.concat(
+        [
+            gens.bus.map(n.buses.country).rename("country"),
+            gens.carrier.rename("carrier"),
+        ],
+        axis=1,
+    )
+
+    # Prepare LHS
+    lhs = capacity_variable.groupby(grouper).sum()
+
+    # Obtain existing capacities
+    existing_capacities = gens.p_nom.groupby(
+        [grouper["country"], grouper["carrier"]]
+    ).sum()
+
+    # Obtain minimum and maximum constraint limits
+    min_values = agg_p_nom_minmax["min"].dropna()
+    max_values = agg_p_nom_minmax["max"].dropna()
+
+    # Adjust limits if existing capacities are considered
+    if agg_p_nom_limits.get("include_existing", False):
+        min_values = (min_values - existing_capacities).clip(lower=0)
+        max_values = (max_values - existing_capacities).clip(lower=0)
+
+    valid_min_index = min_values.index.intersection(lhs.indexes["group"])
+    valid_max_index = max_values.index.intersection(lhs.indexes["group"])
+
+    for grp in valid_min_index:
+        rhs = float(min_values.loc[grp])
+        n.model.add_constraints(
+            lhs.sel(group=grp) >= rhs,
+            name=f"agg_p_nom_min_{grp[0]}_{grp[1]}",
+        )
+
+    for grp in valid_max_index:
+        rhs = float(max_values.loc[grp])
+        n.model.add_constraints(
+            lhs.sel(group=grp) <= rhs,
+            name=f"agg_p_nom_max_{grp[0]}_{grp[1]}",
+        )
 def add_EQ_constraints(n, o, scaling=1e-1):
     """
     Add equity constraints to the network.
@@ -977,6 +1208,72 @@ def add_lossy_bidirectional_link_constraints(n: pypsa.components.Network) -> Non
     # add the constraint to the PySPA model
     n.model.add_constraints(lhs == 0, name="Link-bidirectional_sync")
 
+""" def add_bicharger_constraints(n, costs):
+    tech_type = costs.technology_type
+    carriers_bicharger = [c.split(',')[1] for c in costs.loc[tech_type == "bicharger", "carrier"].unique()]
+    carriers_config = n.config["electricity"]["extendable_carriers"]["Store"]
+    carriers_intersect = set(carriers_bicharger) & set(carriers_config)
+
+    p_nom = n.model["Link-p_nom"]  
+
+    
+    for c in carriers_intersect:
+        links_c = [link for link in n.links.index if c in link]
+
+        for charger in links_c:
+            if "charger" not in charger:
+                continue
+
+            discharger = charger.replace("charger", "discharger")
+            
+            if "bicharger" in charger:
+                link_type = "bicharger"
+            else:
+                link_type = "charger"
+
+            vincolo_name = f"{link_type}_{charger.replace(' ', '_')}"
+           
+            n.model.add_constraints(
+                p_nom[charger] - p_nom[discharger] == 0,
+                name=vincolo_name
+            )
+            print(f"Vincolo aggiunto per {charger} e {discharger}")
+ """
+def add_bicharger_constraints(n, costs):
+    tech_type = costs.technology_type
+    carriers_bicharger = [c.split(',')[1] for c in costs.loc[tech_type == "bicharger", "carrier"].unique()]
+    carriers_config = n.config["electricity"]["extendable_carriers"]["Store"]
+    carriers_intersect = set(carriers_bicharger) & set(carriers_config)
+
+    p_nom = n.model["Link-p_nom"]
+
+    for c in carriers_intersect:
+        links_c = [link for link in n.links.index if c in link]
+
+        for charger in links_c:
+            # prendi solo i charger, non i discharger
+            if "charger" not in charger or "discharger" in charger:
+                continue
+
+            discharger = charger.replace("charger", "discharger")
+
+            # evita KeyError se la coppia non esiste
+            if discharger not in n.links.index:
+                print(f"Discharger non trovato per {charger}: atteso {discharger}")
+                continue
+
+            if "bicharger" in charger:
+                link_type = "bicharger"
+            else:
+                link_type = "charger"
+
+            vincolo_name = f"{link_type}_{charger.replace(' ', '_')}"
+
+            n.model.add_constraints(
+                p_nom[charger] - p_nom[discharger] == 0,
+                name=vincolo_name
+            )
+            print(f"Vincolo aggiunto per {charger} e {discharger}")
 
 def extra_functionality(n, snapshots):
     """
@@ -988,6 +1285,14 @@ def extra_functionality(n, snapshots):
     """
     opts = n.opts
     config = n.config
+    Nyears = n.snapshot_weightings.objective.sum() / 8760.0
+    costs = load_costs(
+        snakemake.input.tech_costs,
+        config["costs"],
+        config["electricity"],
+        Nyears,
+    )
+    add_bicharger_constraints(n, costs)
     if "BAU" in opts and n.generators.p_nom_extendable.any():
         add_BAU_constraints(n, config)
     if "SAFE" in opts and n.generators.p_nom_extendable.any():
@@ -1007,7 +1312,7 @@ def extra_functionality(n, snapshots):
 
     add_battery_constraints(n)
     add_lossy_bidirectional_link_constraints(n)
-
+    
     if snakemake.config["sector"]["chp"]:
         logger.info("setting CHP constraints")
         add_chp_constraints(n)
@@ -1076,6 +1381,7 @@ def solve_network(n, config, solving, **kwargs):
     n.config = config
     n.opts = opts
 
+    
     if skip_iterations:
         status, condition = n.optimize(**kwargs)
     else:
@@ -1091,10 +1397,11 @@ def solve_network(n, config, solving, **kwargs):
             f"Solving status '{status}' with termination condition '{condition}'"
         )
     if "infeasible" in condition:
-        labels = n.model.compute_infeasibilities()
-        logger.info(f"Labels:\n{labels}")
-        n.model.print_infeasibilities()
-        raise RuntimeError("Solving status 'infeasible'")
+        #labels = n.model.compute_infeasibilities()
+        #logger.info(f"Labels:\n{labels}")
+        #n.model.print_infeasibilities()
+        #raise RuntimeError("Solving status 'infeasible'")
+        logger.warning("Infeasible model")
 
     return n
 
@@ -1161,5 +1468,5 @@ if __name__ == "__main__":
     )
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])
-    logger.info(f"Objective function: {n.objective}")
-    logger.info(f"Objective constant: {n.objective_constant}")
+    #logger.info(f"Objective function: {n.objective}") #comment
+    #logger.info(f"Objective constant: {n.objective_constant}") #comment

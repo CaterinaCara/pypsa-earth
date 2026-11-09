@@ -68,7 +68,7 @@ wildcard {unc}, which is described in the config.yaml and created in the Snakefi
 0 to (total number of) SAMPLES.
 """
 import os
-
+import re
 import chaospy
 import numpy as np
 import pandas as pd
@@ -103,12 +103,33 @@ def wildcard_creator(config): #, method=None):
         ]
     if method == "MC":
         return [f"m{i}" for i in range(config["monte_carlo"]["options"]["samples"])]
-    
     if method == "SBAW":
+        uncertainties = config["monte_carlo"]["distributions"][method]["uncertainties"]
+
+        def extract_group(name):
+            m = re.search(r'carrier\s*==\s*"([^"]+)"', name)
+            if m:
+                return m.group(1)
+
+            m = re.search(r'str\.contains\("([^"]+)"\)', name)
+            if m:
+                label = m.group(1)
+                if "H2LT" in label:
+                    return "H2LT"
+                if "H2HT" in label:
+                    return "H2HT"
+                return label
+
+            return name
+
+        groups = list(dict.fromkeys(extract_group(k) for k in uncertainties.keys()))
+        return [f"s{i}" for i in range(len(groups))]
+
+""" if method == "SBAW":
         return [
             f"s{i}" for i in range(len(config["monte_carlo"]["distributions"][method]["uncertainties"]))
             #for i in range(len(config["electricity"]["extendable_carriers"]["Store"]))
-        ]
+        ]"""
 
 
 def monte_carlo_sampling_pydoe2(
@@ -247,9 +268,11 @@ def report_discrepancy(latin_hypercube: np.ndarray):
     lht = mm.fit_transform(latin_hypercube)
 
     discrepancy = qmc.discrepancy(lht)
+    
     logger.info(
-        "Discrepancy is:", discrepancy, " more details in function documentation."
-    )
+    "Discrepancy is: %s more details in function documentation.",
+    discrepancy,
+)
 
 
 def single_best_in_worst_list(worst_list, best_list):
@@ -326,7 +349,94 @@ def get_distribution_object(dist_type, params):
     else:
         raise ValueError(f"Distribuzione non supportata: {dist_type}")
 
+"""def build_percentile_matrix_from_config(uncertainties_config):
+    tech_names = list(uncertainties_config.keys())
+    count = len(tech_names)
+    matrix = np.zeros((count, count))
+    
+    for i in range(count):
+        for j in range(count):
+            tech_j = tech_names[j]
+            dist_info = uncertainties_config[tech_j]
+            dist_type = dist_info['type']
+            params = dist_info['args']
+            
+            dist = get_distribution_object(dist_type, params)
+            mean = dist.mean()
+            
+            percentile = 0.05 if i == j else 0.95
+            ppf_value = dist.ppf(percentile)
+            
+            # Coefficiente moltiplicativo rispetto alla media
+            k = ppf_value / mean if mean != 0 else np.nan
+            matrix[i, j] = k
+            #carrier_names = [re.search(r'"(.*?)"', t).group(1) for t in tech_names]
+    
+    scenarios_k = pd.DataFrame(matrix, index=(tech_names), columns=tech_names)
+    scenarios_k = scenarios_k.values  
+    return scenarios_k"""
+
 def build_percentile_matrix_from_config(uncertainties_config):
+
+    tech_names = list(uncertainties_config.keys())
+
+    # ---- funzione interna per estrarre il gruppo tecnologico ----
+    def extract_group(name):
+        # caso: carrier == "VRX"
+        m = re.search(r'carrier\s*==\s*"([^"]+)"', name)
+        if m:
+            return m.group(1)
+
+        # caso: str.contains("VRX") o "H2LT charger"
+        m = re.search(r'str\.contains\("([^"]+)"\)', name)
+        if m:
+            label = m.group(1)
+            # unifica charger/discharger
+            if "H2LT" in label:
+                return "H2LT"
+            if "H2HT" in label:
+                return "H2HT"
+            return label
+
+        return name  # fallback
+
+    # ---- mappa feature → gruppo ----
+    feature_to_group = {k: extract_group(k) for k in tech_names}
+
+    # ---- lista gruppi unici ----
+    groups = list(dict.fromkeys(feature_to_group.values()))
+    n_groups = len(groups)
+    n_features = len(tech_names)
+
+    matrix = np.zeros((n_groups, n_features))
+
+    # ---- costruzione matrice ----
+    for i, group in enumerate(groups):
+        for j, tech_j in enumerate(tech_names):
+
+            dist_info = uncertainties_config[tech_j]
+            dist_type = dist_info['type']
+            params = dist_info['args']
+
+            dist = get_distribution_object(dist_type, params)
+            mean = dist.mean()
+
+            # 👇 QUI LA LOGICA CHE VOLEVI
+            if feature_to_group[tech_j] == group:
+                percentile =  0.05 #0.05   # BEST
+            else:
+                percentile =  0.95 #0.95   # WORST
+
+            ppf_value = dist.ppf(percentile)
+
+            k = ppf_value / mean if mean != 0 else np.nan
+            matrix[i, j] = k
+
+    scenarios_k = pd.DataFrame(matrix, index=groups, columns=tech_names)
+
+    return scenarios_k.values
+
+def build_percentile_matrix_from_config_v0(uncertainties_config):
     tech_names = list(uncertainties_config.keys())
     count = len(tech_names)
     matrix = np.zeros((count, count))
@@ -360,38 +470,10 @@ def rescale_distribution(
 ) -> np.ndarray:
     """
     Rescales a Latin hypercube sampling (LHS) using specified distribution
-    parameters. More information on the distributions can be found
-    here https://docs.scipy.org/doc/scipy/reference/stats.html
-
-    **Parameters**:
-
-    - latin_hypercube (np.array): The Latin hypercube sampling to be rescaled.
-    - uncertainties_values (list): List of dictionaries containing distribution information.
-
-    Each dictionary should have 'type' key specifying the distribution type and 'args' key
-    containing parameters specific to the chosen distribution.
-
-    **Returns**:
-
-    - np.array: Rescaled Latin hypercube sampling with values in the range [0, 1].
-
-    **Supported Distributions**:
-
-    - "uniform": Rescaled to the specified lower and upper bounds.
-    - "normal": Rescaled using the inverse of the normal distribution function with specified mean and std.
-    - "lognormal": Rescaled using the inverse of the log-normal distribution function with specified mean and std.
-    - "triangle": Rescaled using the inverse of the triangular distribution function with mean calculated from given parameters.
-    - "beta": Rescaled using the inverse of the beta distribution function with specified shape parameters.
-    - "gamma": Rescaled using the inverse of the gamma distribution function with specified shape and scale parameters.
-    - "truncated_normal": Rescaled using the inverse of the truncated normal distribution function with specified mean, std, and bounds.
-
-    **Note**:
-
-    - The function supports rescaling for uniform, normal, lognormal, triangle, beta, gamma, and truncated normal distributions.
-    - The rescaled samples will have values in the range [0, 1].
+    parameters.
     """
-    from scipy.stats import beta, gamma, lognorm, norm, qmc, triang
-    from sklearn.preprocessing import MinMaxScaler, minmax_scale
+    from scipy.stats import beta, gamma, lognorm, norm, triang
+    from sklearn.preprocessing import minmax_scale
 
     for idx, value in enumerate(uncertainties_values):
         dist = value.get("type")
@@ -399,121 +481,340 @@ def rescale_distribution(
 
         match dist:
             case "uniform":
-                l_bounds, u_bounds = params
+                loc, scale = params
                 latin_hypercube[:, idx] = minmax_scale(
-                    latin_hypercube[:, idx], feature_range=(l_bounds, u_bounds))
+                    latin_hypercube[:, idx],
+                    feature_range=(loc, loc + scale),
+                )
+
             case "normal":
                 mean, std = params
-                latin_hypercube[:, idx] = norm.ppf(latin_hypercube[:, idx], mean, std)
-            case "lognormal":
-                shape = params[0]
-                latin_hypercube[:, idx] = lognorm.ppf(latin_hypercube[:, idx], s=shape)
-            case "triangle":
-                mid_point = params[0]
-                latin_hypercube[:, idx] = triang.ppf(latin_hypercube[:, idx], mid_point)
-            case "beta":
-                a, b = params
-                latin_hypercube[:, idx] = beta.ppf(latin_hypercube[:, idx], a, b)
-            case "gamma":
-                shape, scale = params
-                latin_hypercube[:, idx] = gamma.ppf(
-                    latin_hypercube[:, idx], shape, scale
+                latin_hypercube[:, idx] = norm.ppf(
+                    latin_hypercube[:, idx],
+                    loc=mean,
+                    scale=std,
                 )
+
+            case "lognormal":
+                if len(params) == 1:
+                    s = params[0]
+                    loc = 0
+                    scale = 1
+                elif len(params) == 2:
+                    s, loc = params
+                    scale = 1
+                elif len(params) == 3:
+                    s, loc, scale = params
+                else:
+                    raise ValueError(
+                        "lognormal must have [s], [s, loc], or [s, loc, scale]"
+                    )
+
+                latin_hypercube[:, idx] = lognorm.ppf(
+                    latin_hypercube[:, idx],
+                    s=s,
+                    loc=loc,
+                    scale=scale,
+                )
+
+            case "triangle":
+                if len(params) == 1:
+                    c = params[0]
+                    loc = 0
+                    scale = 1
+                elif len(params) == 2:
+                    c, loc = params
+                    scale = 1
+                elif len(params) == 3:
+                    c, loc, scale = params
+                else:
+                    raise ValueError(
+                        "triangle must have [c], [c, loc], or [c, loc, scale]"
+                    )
+
+                latin_hypercube[:, idx] = triang.ppf(
+                    latin_hypercube[:, idx],
+                    c=c,
+                    loc=loc,
+                    scale=scale,
+                )
+
+            case "beta":
+                if len(params) == 2:
+                    a, b = params
+                    loc = 0
+                    scale = 1
+                elif len(params) == 3:
+                    a, b, loc = params
+                    scale = 1
+                elif len(params) == 4:
+                    a, b, loc, scale = params
+                else:
+                    raise ValueError(
+                        "beta must have [a, b], [a, b, loc], or [a, b, loc, scale]"
+                    )
+
+                latin_hypercube[:, idx] = beta.ppf(
+                    latin_hypercube[:, idx],
+                    a=a,
+                    b=b,
+                    loc=loc,
+                    scale=scale,
+                )
+
+            case "gamma":
+                if len(params) == 1:
+                    shape = params[0]
+                    loc = 0
+                    scale = 1
+                elif len(params) == 2:
+                    shape, scale = params
+                    loc = 0
+                elif len(params) == 3:
+                    shape, loc, scale = params
+                else:
+                    raise ValueError(
+                        "gamma must have [shape], [shape, scale], or [shape, loc, scale]"
+                    )
+
+                latin_hypercube[:, idx] = gamma.ppf(
+                    latin_hypercube[:, idx],
+                    a=shape,
+                    loc=loc,
+                    scale=scale,
+                )
+
             case "truncated_normal":
                 a, b, mean, std = params
-                latin_hypercube[:, idx] = truncnorm.ppf(latin_hypercube[:, idx], a, b, loc=mean, scale=std)
+                latin_hypercube[:, idx] = truncnorm.ppf(
+                    latin_hypercube[:, idx],
+                    a,
+                    b,
+                    loc=mean,
+                    scale=std,
+                )
+
+            case _:
+                raise ValueError(f"Unsupported distribution: {dist}")
 
     report_discrepancy(latin_hypercube)
-
     return latin_hypercube
-
 
 def validate_parameters(
     sampling_strategy: str, samples: int, uncertainties_values: dict
 ) -> None:
-    """
-    Validates the parameters for a given probability distribution. Inputs from
-    user through the config file needs to be validated before proceeding to
-    perform monte-carlo simulations.
-
-    **Parameters**:
-
-    - sampling_strategy: str
-        The chosen sampling strategy from chaospy, scipy and pydoe2
-    - samples: int
-        The number of samples to generate for the simulation
-    - distribution: str
-        The name of the probability distribution.
-    - distribution_params: list
-        The parameters associated with the probability distribution.
-
-    **Raises**:
-
-    - ValueError: If the parameters are invalid for the specified distribution.
-    """
-
     valid_strategy = ["chaospy", "scipy", "pydoe2"]
-    valid_distribution = ["uniform", "normal", "lognormal", "triangle", "beta", "gamma", "truncated_normal"]
+    valid_distribution = [
+        "uniform",
+        "normal",
+        "lognormal",
+        "triangle",
+        "beta",
+        "gamma",
+        "truncated_normal",
+    ]
 
-    # verifying samples and distribution_params
     if samples is None:
-        raise ValueError(f"assign a value to samples")
-    elif type(samples) is float or type(samples) is str:
-        raise ValueError(f"samples must be an integer")
+        raise ValueError("assign a value to samples")
+    elif isinstance(samples, (float, str)):
+        raise ValueError("samples must be an integer")
 
-    # verify sampling strategy
     if sampling_strategy not in valid_strategy:
         raise ValueError(
-            f" Invalid sampling strategy: {sampling_strategy}. Choose from {valid_strategy}"
+            f"Invalid sampling strategy: {sampling_strategy}. Choose from {valid_strategy}"
         )
 
-    for idx, value in enumerate(uncertainties_values):
+    for value in uncertainties_values:
         dist_type = value.get("type")
         param = value.get("args")
 
-        if dist_type is None or len(param) == 0:
-            raise ValueError(f"assign a list of parameters to distribution_params")
+        if dist_type is None or param is None or len(param) == 0:
+            raise ValueError("assign a list of parameters to distribution_params")
 
         if dist_type not in valid_distribution:
             raise ValueError(
-                f"Unsupported Distribution : {dist_type}. Choose from {valid_distribution}"
+                f"Unsupported Distribution: {dist_type}. Choose from {valid_distribution}"
             )
 
-        if dist_type == "triangle":
-            if len(param) != 1:
-                raise ValueError(
-                    f"{dist_type} distribution has to be 1 parameter [midpoint_between_0_and_1]"
-                )
-            elif param[0] < 0 or param[0] > 1:
-                raise ValueError(
-                    f"{dist_type} distribution has to have a midpoint between 0 and 1"
-                )
+        if dist_type == "uniform":
+            if len(param) != 2:
+                raise ValueError("uniform must have 2 parameters: [loc, scale]")
+            if param[1] <= 0:
+                raise ValueError("uniform: scale must be strictly positive")
 
-        if dist_type in ["normal", "uniform", "beta", "gamma"] and len(param) != 2:
-            raise ValueError(f"{dist_type} distribution must have 2 parameters")
-        elif dist_type == "lognormal" and len(param) != 1:
-            raise ValueError(f"{dist_type} must have a single parameter")
+        elif dist_type == "normal":
+            if len(param) != 2:
+                raise ValueError("normal must have 2 parameters: [mean, std]")
+            if param[1] <= 0:
+                raise ValueError("normal: std must be strictly positive")
 
-        # handling having 0 as values in beta and gamma
-        if dist_type in ["beta", "gamma"]:
-            if np.min(param) <= 0:
+        elif dist_type == "lognormal":
+            if len(param) not in [1, 2, 3]:
                 raise ValueError(
-                    f"{dist_type} distribution cannot have values lower than zero in parameters"
+                    "lognormal must have [s], [s, loc], or [s, loc, scale]"
                 )
-        # truncated_normal requires 4 params: [a, b, loc, scale], with scale > 0
-        if dist_type == "truncated_normal":
+            if param[0] <= 0:
+                raise ValueError("lognormal: s must be strictly positive")
+            if len(param) == 3 and param[2] <= 0:
+                raise ValueError("lognormal: scale must be strictly positive")
+
+        elif dist_type == "triangle":
+            if len(param) not in [1, 2, 3]:
+                raise ValueError(
+                    "triangle must have [c], [c, loc], or [c, loc, scale]"
+                )
+            if not 0 <= param[0] <= 1:
+                raise ValueError("triangle: c must be between 0 and 1")
+            if len(param) == 3 and param[2] <= 0:
+                raise ValueError("triangle: scale must be strictly positive")
+
+        elif dist_type == "beta":
+            if len(param) not in [2, 3, 4]:
+                raise ValueError(
+                    "beta must have [a, b], [a, b, loc], or [a, b, loc, scale]"
+                )
+            if param[0] <= 0 or param[1] <= 0:
+                raise ValueError("beta: a and b must be strictly positive")
+            if len(param) == 4 and param[3] <= 0:
+                raise ValueError("beta: scale must be strictly positive")
+
+        elif dist_type == "gamma":
+            if len(param) not in [1, 2, 3]:
+                raise ValueError(
+                    "gamma must have [shape], [shape, scale], or [shape, loc, scale]"
+                )
+            if param[0] <= 0:
+                raise ValueError("gamma: shape must be strictly positive")
+            if len(param) == 2 and param[1] <= 0:
+                raise ValueError("gamma: scale must be strictly positive")
+            if len(param) == 3 and param[2] <= 0:
+                raise ValueError("gamma: scale must be strictly positive")
+
+        elif dist_type == "truncated_normal":
             if len(param) != 4:
                 raise ValueError(
-                    f"{dist_type} distribution must have 4 parameters: [a, b, loc, scale]"
+                    "truncated_normal must have 4 parameters: [a, b, loc, scale]"
                 )
             if param[3] <= 0:
                 raise ValueError(
-                    f"{dist_type}: scale (4th parameter) must be strictly positive"
+                    "truncated_normal: scale must be strictly positive"
                 )
-
 
     return None
 
+def calculate_annuity(n, r):
+    """
+    Calculate the annuity factor for an asset with lifetime n years and
+    discount rate of r, e.g. annuity(20, 0.05) * 20 = 1.6.
+    """
+    if isinstance(r, pd.Series):
+        return pd.Series(1 / n, index=r.index).where(
+            r == 0, r / (1.0 - 1.0 / (1.0 + r) ** n)
+        )
+    elif r > 0:
+        return r / (1.0 - 1.0 / (1.0 + r) ** n)
+    else:
+        return 1 / n
+
+def capex_to_capital_cost(k, capex_value, n, costs):
+    """
+    Convert sampled CAPEX to annualized PyPSA capital_cost.
+
+    capex_value:
+      - EUR/kW for generators/links
+      - EUR/kWh for stores
+
+    output:
+      - EUR/MW/a for generators/links
+      - EUR/MWh/a for stores
+    """
+
+    def annualize(tech, capex_kw):
+        lifetime = costs.at[tech, "lifetime"]
+        fom = costs.at[tech, "FOM"] if "FOM" in costs.columns else 0.0
+        discount_rate = costs.at[tech, "discount rate"]
+
+        capex_mw = capex_kw * 1000.0
+
+        return (
+            calculate_annuity(lifetime, discount_rate)
+            + fom / 100.0
+        ) * capex_mw
+
+    if 'carrier == "solar"' in k:
+        return annualize("solar", capex_value)
+
+    if 'carrier == "onwind"' in k:
+        return annualize("onwind", capex_value)
+
+    if 'carrier == "FPVinnerbasin"' in k:
+        return annualize("FPVinnerbasin", capex_value)
+
+    if 'carrier == "offwind-ac"' in k:
+        base_total = n.generators.loc[
+            n.generators.carrier == "offwind-ac",
+            "capital_cost",
+        ]
+        base_core = costs.at["offwind", "capital_cost"]
+        extra = base_total - base_core
+        return annualize("offwind", capex_value) + extra
+
+    if 'carrier == "offwind-FPVsea"' in k:
+        base_total = n.generators.loc[
+            n.generators.carrier == "offwind-FPVsea",
+            "capital_cost",
+        ]
+        base_core = costs.at["offwind-FPVsea", "capital_cost"]
+        extra = base_total - base_core
+        return annualize("offwind-FPVsea", capex_value) + extra
+
+    if 'carrier == "VRX"' in k and "stores" in k:
+        return annualize("V-RX-store", capex_value)
+
+    if "VRX" in k and "links" in k:
+        return annualize("V-RX-bicharger", capex_value)
+
+    if 'carrier == "CCair"' in k and "stores" in k:
+        return annualize("CAES-store", capex_value)
+
+    if "CCair" in k and "links" in k:
+        return annualize("CAES-bicharger", capex_value)
+
+    if "LIION" in k and "stores" in k:
+        return annualize("LI-ION-store", capex_value)
+
+    if "LIION" in k and "links" in k:
+        return annualize("LI-ION-bicharger", capex_value)
+    
+    if 'carrier == "FW"' in k and "stores" in k:
+        return annualize("FLYWHEEL-store", capex_value)
+
+    if "FW" in k and "links" in k:
+        return annualize("FLYWHEEL-bicharger", capex_value)
+    
+    if 'carrier == "H2LT"' in k and "stores" in k:
+        return annualize("hydrogen storage tank LT", capex_value)
+
+    if "H2LT charger" in k and "links" in k:
+        return annualize("PEM ELY-charger", capex_value)
+
+    if "H2LT discharger" in k and "links" in k:
+        return annualize("PEM FC-discharger", capex_value)
+    
+    if 'carrier == "H2HT"' in k and "stores" in k:
+        return annualize("hydrogen storage tank HT", capex_value)
+
+    if "H2HT charger" in k and "links" in k:
+        return annualize("SOEC ELY-charger", capex_value)
+
+    if "H2HT discharger" in k and "links" in k:
+        return annualize("SO FC-discharger", capex_value)
+
+    if 'carrier == "nuclear"' in k:
+        return annualize("nuclear", capex_value)
+
+
+    return capex_value
 
 if __name__ == "__main__":
     if "snakemake" not in globals():
@@ -530,7 +831,16 @@ if __name__ == "__main__":
     
     configure_logging(snakemake)
     config = snakemake.config
-    n = pypsa.Network(snakemake.input[0])
+    #n = pypsa.Network(snakemake.input[0])
+    n = pypsa.Network(snakemake.input.network)
+    Nyears = n.snapshot_weightings.objective.sum() / 8760.0
+
+    costs = load_costs(
+        snakemake.input.tech_costs,
+        snakemake.params.costs,
+        snakemake.params.electricity,
+        Nyears,
+    )
     monte_carlo_config = snakemake.params.monte_carlo
 
     ### PREPARAZIONE VARIABLES PER MONTE CARLO GLOBAL SENSIIVITY
@@ -647,8 +957,16 @@ if __name__ == "__main__":
                 # i, j interation number to pick values of experimental setup
                 # Example: n.loads_t.p_set = n.loads_t.p_set * lh_scaled[0,0]
                 # si muove per campionamento, quindi riscala tutta la riga per tutti i param affetti da uncertainty
-                exec(f"n.{k} = n.{k} * {lh[i,j]}")
-                logger.info(f"Scaled n.{k} by factor {lh[i,j]} in the {i} scenario")
+                value = lh[i, j]
+
+                if "capital_cost" in k:
+                    value = capex_to_capital_cost(k, value, n, costs)
+
+                exec(f"n.{k} = value")
+                logger.info(f"Set n.{k} to value {value} in the {i} scenario")
+
+                #exec(f"n.{k} = {lh[i,j]}")
+                #logger.info(f"Set n.{k} to value {lh[i,j]} in the {i} scenario")
                 j = j + 1
 
     if monte_carlo_config["options"]["method"] == "single_best_in_worst":
@@ -692,6 +1010,7 @@ if __name__ == "__main__":
             ).to_dict()
         n.meta.update(latin_hypercube_dict)  # AGGIORNA I DATI DEL NETWORK
         n.export_to_netcdf(snakemake.output[0])
+        
 
     if monte_carlo_config["options"]["method"] == "single_best_in_worst":
         scenario_dict = (

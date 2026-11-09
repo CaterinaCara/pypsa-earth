@@ -700,7 +700,30 @@ if __name__ == "__main__":
             buffer = config["max_shore_distance"]
             excluder.add_geometry(paths.country_shapes, buffer=buffer, invert=True)
 
-        kwargs = dict(nprocesses=nprocesses, disable_progressbar=noprogress)
+        #kwargs = dict(nprocesses=nprocesses, disable_progressbar=noprogress)
+        kwargs = dict(disable_progressbar=noprogress)
+        if nprocesses > 1:
+            kwargs["nprocesses"] = nprocesses
+
+
+        print("DEBUG snakemake.threads =", snakemake.threads)
+        print("DEBUG kwargs before availabilitymatrix =", kwargs)
+        print("DEBUG excluder.all_closed BEFORE =", excluder.all_closed)
+
+                
+        print("DEBUG excluder.rasters:")
+        for i, r in enumerate(excluder.rasters):
+            print(f"  raster #{i}: type={type(r)} repr={r}")
+            if hasattr(r, "closed"):
+                print(f"    closed={r.closed}")
+            if hasattr(r, "name"):
+                print(f"    name={r.name}")
+
+        print("DEBUG excluder.geometries:")
+        for i, g in enumerate(excluder.geometries):
+            print(f"  geometry #{i}: type={type(g)} repr={g}")
+        
+        
         if noprogress:
             logger.info("Calculate landuse availabilities...")
             start = time.time()
@@ -710,6 +733,7 @@ if __name__ == "__main__":
             logger.info(f"Completed availability calculation ({duration:2.2f}s)")
         else:
             availability = cutout.availabilitymatrix(regions, excluder, **kwargs)
+            
         area = cutout.grid.to_crs(area_crs).area / 1e6
         area = xr.DataArray(
             area.values.reshape(cutout.shape), [cutout.coords["y"], cutout.coords["x"]]
